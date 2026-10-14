@@ -1,0 +1,8 @@
+{
+  "name": "VoiceCraft AI",
+  "description": "Text-to-speech studio with advanced voice cloning, multi-language support (Urdu, Hindi, English), and Pakistani commercial voiceover optimization.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
