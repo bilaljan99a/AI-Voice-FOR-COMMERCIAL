@@ -11,8 +11,9 @@ import {
   CustomClonedVoice,
   AdTemplate,
 } from './types';
-import { generateSpeech } from './services/geminiService';
+import { generateSpeech, getActiveApiKey } from './services/geminiService';
 import { base64ToUint8Array, pcmToWavBlob } from './utils/audioHelper';
+import { enhanceVoiceAcoustics } from './utils/audioDsp';
 import { VOICE_CATALOG } from './data/voiceCatalog';
 import { PAKISTANI_AD_TEMPLATES } from './data/adTemplates';
 import {
@@ -27,24 +28,34 @@ import {
   Volume2,
   Flame,
   CheckCircle2,
-  HelpCircle,
   X,
-  Share2
+  Gauge,
+  Key,
+  Globe,
+  ExternalLink,
+  HelpCircle
 } from 'lucide-react';
 
 const LOCAL_STORAGE_CLONES_KEY = 'voicecraft_custom_cloned_voices_v1';
-const LOCAL_STORAGE_HISTORY_KEY = 'voicecraft_generated_history_v1';
+const LOCAL_STORAGE_KEY_STORAGE = 'voicecraft_gemini_api_key';
 
 const App: React.FC = () => {
   // Mobile / View Mode: 'studio' | 'voices' | 'clone_lab' | 'templates' | 'history'
   const [activeTab, setActiveTab] = useState<'studio' | 'voices' | 'clone_lab' | 'templates' | 'history'>('studio');
 
   // Controls state
-  const [selectedVoice, setSelectedVoice] = useState<VoiceName>(VoiceName.Hamza_Pak_Male);
-  const [selectedStyle, setSelectedStyle] = useState<SpeechStyle>(SpeechStyle.Pakistani_Dhamaka);
+  const [selectedVoice, setSelectedVoice] = useState<VoiceName>(VoiceName.Ayesha_Pak_Female);
+  const [selectedStyle, setSelectedStyle] = useState<SpeechStyle>(SpeechStyle.Pakistani_Lawn_Beauty);
   const [selectedLanguage, setSelectedLanguage] = useState<Language>(Language.RomanUrdu);
-  const [speechSpeed, setSpeechSpeed] = useState<number>(1.05);
-  const [commercialEnergy, setCommercialEnergy] = useState<CommercialEnergy>('High-Impact Dhamaka');
+  const [speechSpeed, setSpeechSpeed] = useState<number>(1.0);
+  const [commercialEnergy, setCommercialEnergy] = useState<CommercialEnergy>('Balanced Commercial');
+
+  // API Key & Deployment Modal State
+  const [showDeployModal, setShowDeployModal] = useState<boolean>(false);
+  const [apiKeyInput, setApiKeyInput] = useState<string>(() => {
+    return localStorage.getItem(LOCAL_STORAGE_KEY_STORAGE) || '';
+  });
+  const [apiKeySavedSuccess, setApiKeySavedSuccess] = useState<boolean>(false);
 
   // Voice Cloning State
   const [customVoices, setCustomVoices] = useState<CustomClonedVoice[]>(() => {
@@ -59,7 +70,7 @@ const App: React.FC = () => {
 
   // Content state
   const [text, setText] = useState<string>(
-    'Khushkhabri! Is Bari Eid par laya hai Mega Mart sab se bara Dhamaka Offer! Pure pachas feesad tak ki bachat. Offer mehdood muddat ke liye hai, aaj hi tashreef laayein!'
+    'Khubsurati jo dilon ko moh le... Noor Fashion ki nayi Festive Lawn Collection ab dastyab hai tamam leading stores par. Sajaiye apna har pal, ba-waqar andaaz mein.'
   );
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [generatedList, setGeneratedList] = useState<GeneratedAudio[]>([]);
@@ -86,7 +97,7 @@ const App: React.FC = () => {
     setCustomVoices((prev) => prev.filter((v) => v.id !== id));
     if (activeCustomVoice?.id === id) {
       setActiveCustomVoice(null);
-      setSelectedVoice(VoiceName.Hamza_Pak_Male);
+      setSelectedVoice(VoiceName.Ayesha_Pak_Female);
     }
   };
 
@@ -113,6 +124,25 @@ const App: React.FC = () => {
     setActiveTab('studio');
   };
 
+  // Save custom API key for GitHub Pages or Custom domain usage
+  const handleSaveApiKey = () => {
+    if (apiKeyInput.trim()) {
+      localStorage.setItem(LOCAL_STORAGE_KEY_STORAGE, apiKeyInput.trim());
+      setApiKeySavedSuccess(true);
+      setTimeout(() => {
+        setApiKeySavedSuccess(false);
+        setShowDeployModal(false);
+      }, 1500);
+    } else {
+      localStorage.removeItem(LOCAL_STORAGE_KEY_STORAGE);
+      setApiKeySavedSuccess(true);
+      setTimeout(() => {
+        setApiKeySavedSuccess(false);
+        setShowDeployModal(false);
+      }, 1000);
+    }
+  };
+
   // Handle TTS Generation
   const handleGenerate = async () => {
     if (!text.trim()) return;
@@ -121,7 +151,7 @@ const App: React.FC = () => {
     setError(null);
 
     try {
-      // 1. Call Gemini TTS API
+      // 1. Call Gemini TTS API with natural human styling
       const base64Audio = await generateSpeech(
         text,
         selectedVoice,
@@ -132,14 +162,17 @@ const App: React.FC = () => {
         selectedVoice === VoiceName.Custom_Cloned ? activeCustomVoice : null
       );
 
-      // 2. Process Audio (Base64 -> PCM -> WAV Blob -> Object URL)
+      // 2. Wrap PCM in pure 24kHz WAV container
       const pcmData = base64ToUint8Array(base64Audio);
-      const wavBlob = pcmToWavBlob(pcmData);
-      const audioUrl = URL.createObjectURL(wavBlob);
+      const rawWavBlob = pcmToWavBlob(pcmData);
+
+      // 3. Gentle broadcast mastering limiting (NO robotic pitch or speed distortion)
+      const cleanWavBlob = await enhanceVoiceAcoustics(rawWavBlob);
+      const audioUrl = URL.createObjectURL(cleanWavBlob);
 
       // Voice display info
-      let voiceDisplayName = 'Hamza (Pakistani Promo)';
-      let voiceGender: 'Male' | 'Female' | 'Cloned' = 'Male';
+      let voiceDisplayName = 'Ayesha (Pakistani Beauty)';
+      let voiceGender: 'Male' | 'Female' | 'Cloned' = 'Female';
 
       if (selectedVoice === VoiceName.Custom_Cloned && activeCustomVoice) {
         voiceDisplayName = `🧬 ${activeCustomVoice.name}`;
@@ -152,7 +185,7 @@ const App: React.FC = () => {
         }
       }
 
-      // 3. Update State
+      // 4. Update State
       const newAudio: GeneratedAudio = {
         id: Date.now().toString(),
         textSnippet: text.slice(0, 65) + (text.length > 65 ? '...' : ''),
@@ -172,7 +205,7 @@ const App: React.FC = () => {
 
       setGeneratedList((prev) => [newAudio, ...prev]);
 
-      // Automatically switch to history tab on mobile so user sees the newly generated audio immediately!
+      // Automatically switch to history view on mobile
       if (window.innerWidth < 768) {
         setActiveTab('history');
       }
@@ -212,11 +245,11 @@ const App: React.FC = () => {
                   VoiceCraft <span className="text-emerald-400">Studio</span>
                 </h1>
                 <span className="hidden sm:inline-block text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-300 border border-emerald-500/20 font-medium">
-                  🇵🇰 Pakistani Commercial Voice AI
+                  Natural Human Commercial Voice AI
                 </span>
               </div>
               <p className="text-[11px] text-slate-400 hidden xs:block">
-                Urdu, Hindi & English Text to Speech • Voice Cloning • Commercial Ad Voices
+                Authentic Male & Female Voices • Pakistani Commercial Ads • Deploy Anywhere
               </p>
             </div>
           </div>
@@ -256,10 +289,25 @@ const App: React.FC = () => {
               <FileText size={13} className="text-amber-400" />
               Ad Templates
             </button>
+            <button
+              onClick={() => setShowDeployModal(true)}
+              className="px-3.5 py-1.5 rounded-xl bg-slate-800 border border-slate-700 text-slate-300 hover:text-white transition-all flex items-center gap-1.5"
+              title="GitHub & Custom Domain Setup"
+            >
+              <Globe size={13} className="text-cyan-400" />
+              GitHub / Domain Setup
+            </button>
           </div>
 
-          {/* Quick Active Voice Indicator on mobile */}
+          {/* Mobile Quick Action Buttons */}
           <div className="md:hidden flex items-center gap-2">
+            <button
+              onClick={() => setShowDeployModal(true)}
+              className="p-1.5 rounded-lg bg-slate-800 text-cyan-400"
+              title="GitHub / API Key"
+            >
+              <Globe size={16} />
+            </button>
             <button
               onClick={() => setActiveTab('clone_lab')}
               className="px-2.5 py-1 rounded-lg bg-purple-950/60 border border-purple-500/40 text-purple-300 text-xs font-medium flex items-center gap-1"
@@ -401,7 +449,7 @@ const App: React.FC = () => {
                         : VOICE_CATALOG.find((v) => v.id === selectedVoice)?.name || selectedVoice}
                     </span>
                     <span className="text-[10px] text-indigo-400 block truncate">
-                      {selectedStyle} • {selectedLanguage} • {commercialEnergy}
+                      {selectedStyle} • {speechSpeed.toFixed(2)}x Speed • {commercialEnergy}
                     </span>
                   </div>
                 </div>
@@ -446,7 +494,7 @@ const App: React.FC = () => {
 
                 {/* Textarea Input */}
                 <textarea
-                  className={`w-full min-h-[160px] sm:min-h-[220px] bg-transparent p-4 sm:p-5 text-base sm:text-lg text-slate-100 placeholder-slate-600 outline-none resize-none leading-relaxed font-light ${
+                  className={`w-full min-h-[160px] sm:min-h-[200px] bg-transparent p-4 sm:p-5 text-base sm:text-lg text-slate-100 placeholder-slate-600 outline-none resize-none leading-relaxed font-light ${
                     isUrduScript ? 'font-serif text-right text-xl leading-loose' : 'font-sans'
                   }`}
                   placeholder={`Enter your commercial script in Urdu, Roman Urdu, Hindi or English...\n\nExample:\n"Khushkhabri! Is Bari Eid par sab se bara Dhamaka Offer! Pure 50% tak ki bachat. Stock mehdood hai, aaj hi tashreef laayein!"`}
@@ -459,42 +507,61 @@ const App: React.FC = () => {
                 <div className="px-4 py-2 bg-slate-950/60 border-t border-slate-800 flex items-center gap-2 overflow-x-auto no-scrollbar text-xs">
                   <span className="text-slate-500 text-[10px] whitespace-nowrap">Load Preset:</span>
                   <button
-                    onClick={() => applyAdTemplate(PAKISTANI_AD_TEMPLATES[0])}
-                    className="px-2.5 py-1 rounded-lg bg-slate-850 hover:bg-slate-800 text-slate-300 whitespace-nowrap text-[11px]"
+                    onClick={() => applyAdTemplate(PAKISTANI_AD_TEMPLATES[3])}
+                    className="px-2.5 py-1 rounded-lg bg-pink-950/50 hover:bg-pink-900/60 text-pink-300 border border-pink-800/40 whitespace-nowrap text-[11px]"
                   >
-                    💥 Dhamaka Sale
+                    👩 Ayesha (Beauty & Lawn)
                   </button>
                   <button
                     onClick={() => applyAdTemplate(PAKISTANI_AD_TEMPLATES[1])}
+                    className="px-2.5 py-1 rounded-lg bg-emerald-950/50 hover:bg-emerald-900/60 text-emerald-300 border border-emerald-800/40 whitespace-nowrap text-[11px]"
+                  >
+                    👩 Maryam (Shaahi Chai)
+                  </button>
+                  <button
+                    onClick={() => applyAdTemplate(PAKISTANI_AD_TEMPLATES[0])}
                     className="px-2.5 py-1 rounded-lg bg-slate-850 hover:bg-slate-800 text-slate-300 whitespace-nowrap text-[11px]"
                   >
-                    ☕ Shaahi Chai (Urdu)
+                    👨 Hamza (Dhamaka Sale)
                   </button>
                   <button
                     onClick={() => applyAdTemplate(PAKISTANI_AD_TEMPLATES[2])}
                     className="px-2.5 py-1 rounded-lg bg-slate-850 hover:bg-slate-800 text-slate-300 whitespace-nowrap text-[11px]"
                   >
-                    🏙️ Housing Scheme
+                    👨 Tariq (Real Estate)
                   </button>
-                  <button
-                    onClick={() => applyAdTemplate(PAKISTANI_AD_TEMPLATES[3])}
-                    className="px-2.5 py-1 rounded-lg bg-slate-850 hover:bg-slate-800 text-slate-300 whitespace-nowrap text-[11px]"
-                  >
-                    👗 Festive Lawn
-                  </button>
-                  <button
-                    onClick={() => applyAdTemplate(PAKISTANI_AD_TEMPLATES[4])}
-                    className="px-2.5 py-1 rounded-lg bg-slate-850 hover:bg-slate-800 text-slate-300 whitespace-nowrap text-[11px]"
-                  >
-                    🍕 20-Min Delivery App
-                  </button>
+                </div>
+
+                {/* Speed Setting Quick Bar */}
+                <div className="px-4 py-2.5 bg-slate-900/40 border-t border-slate-800 flex flex-wrap items-center justify-between gap-2 text-xs">
+                  <div className="flex items-center gap-2 text-cyan-400 font-mono">
+                    <Gauge size={14} />
+                    <span>Speed: {speechSpeed.toFixed(2)}x (Natural Pitch-Preserved)</span>
+                  </div>
+
+                  <div className="flex items-center gap-1 text-[11px] text-slate-400">
+                    <span>Quick Speed:</span>
+                    {[0.85, 1.0, 1.15, 1.3].map((s) => (
+                      <button
+                        key={s}
+                        onClick={() => setSpeechSpeed(s)}
+                        className={`px-2 py-0.5 rounded text-[10px] font-mono ${
+                          Math.abs(speechSpeed - s) < 0.03
+                            ? 'bg-cyan-500 text-slate-950 font-bold'
+                            : 'bg-slate-800 text-slate-300 hover:text-white'
+                        }`}
+                      >
+                        {s}x
+                      </button>
+                    ))}
+                  </div>
                 </div>
 
                 {/* Generate Action Bar */}
                 <div className="p-4 border-t border-slate-800 bg-slate-900/60 rounded-b-2xl flex flex-col sm:flex-row items-center justify-between gap-3">
                   <div className="flex items-center gap-2 text-xs text-slate-400">
                     <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-                    <span>Gemini 2.5/3.8 TTS Engine Ready</span>
+                    <span>Gemini TTS Human Voice Ready</span>
                   </div>
 
                   <button
@@ -509,7 +576,7 @@ const App: React.FC = () => {
                     {isLoading ? (
                       <>
                         <Loader2 size={18} className="animate-spin text-white" />
-                        Generating Commercial Audio...
+                        Generating Natural Audio...
                       </>
                     ) : (
                       <>
@@ -527,7 +594,7 @@ const App: React.FC = () => {
                 <div className="p-4 bg-red-950/40 border border-red-800/80 rounded-2xl text-red-200 text-xs sm:text-sm animate-in fade-in flex items-start gap-3">
                   <div className="w-2 h-2 rounded-full bg-red-500 mt-1 flex-shrink-0" />
                   <div className="flex-1">
-                    <strong className="block font-semibold text-red-100">Audio Generation Error</strong>
+                    <strong className="block font-semibold text-red-100">Audio Generation Note</strong>
                     <span className="text-red-200/90 leading-relaxed">{error}</span>
                   </div>
                   <button onClick={() => setError(null)} className="text-red-400 hover:text-white">
@@ -550,7 +617,7 @@ const App: React.FC = () => {
                   </h3>
                   {generatedList.length > 0 && (
                     <span className="text-[11px] text-slate-500">
-                      WAV Studio Format • BGM Mixer Enabled
+                      WAV Studio Format • Live Speed Controls • BGM Mixer
                     </span>
                   )}
                 </div>
@@ -562,7 +629,7 @@ const App: React.FC = () => {
                     </div>
                     <p className="text-xs text-slate-400">No voiceovers generated yet.</p>
                     <p className="text-[11px] text-slate-500 mt-1">
-                      Type your script above or click an ad preset, then tap "Generate Commercial Audio"!
+                      Choose a voice (Ayesha for soft beauty, Maryam for warm Chai, Hamza for sale promo), then tap Generate!
                     </p>
                   </div>
                 ) : (
@@ -676,7 +743,7 @@ const App: React.FC = () => {
         </button>
       </nav>
 
-      {/* Ad Templates Modal / Drawer */}
+      {/* Ad Templates Modal */}
       {showTemplateModal && (
         <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4 animate-in fade-in">
           <div className="bg-slate-900 border border-slate-800 rounded-t-3xl sm:rounded-2xl max-w-2xl w-full max-h-[85vh] flex flex-col overflow-hidden shadow-2xl">
@@ -723,6 +790,95 @@ const App: React.FC = () => {
                   </div>
                 </div>
               ))}
+            </div>
+
+          </div>
+        </div>
+      )}
+
+      {/* GitHub & Custom Domain Deployment Guide Modal */}
+      {showDeployModal && (
+        <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4 animate-in fade-in">
+          <div className="bg-slate-900 border border-slate-800 rounded-t-3xl sm:rounded-2xl max-w-xl w-full max-h-[90vh] flex flex-col overflow-hidden shadow-2xl">
+            
+            <div className="p-4 sm:p-5 border-b border-slate-800 flex items-center justify-between">
+              <div>
+                <h3 className="font-bold text-white text-base flex items-center gap-2">
+                  <Globe size={18} className="text-cyan-400" />
+                  Deploy Outside AI Studio & Custom Domain
+                </h3>
+                <p className="text-xs text-slate-400">
+                  How to host on GitHub, Vercel, Netlify, or your own custom domain.
+                </p>
+              </div>
+              <button
+                onClick={() => setShowDeployModal(false)}
+                className="p-1.5 rounded-lg bg-slate-800 text-slate-400 hover:text-white"
+              >
+                <X size={16} />
+              </button>
+            </div>
+
+            <div className="p-5 overflow-y-auto space-y-5 custom-scrollbar text-xs leading-relaxed text-slate-300">
+              
+              {/* API Key setting */}
+              <div className="p-4 bg-slate-950/80 rounded-xl border border-slate-800 space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="font-semibold text-white flex items-center gap-1.5">
+                    <Key size={14} className="text-amber-400" />
+                    Custom Gemini API Key
+                  </span>
+                  <span className="text-[10px] text-slate-500 font-mono">Saved in browser</span>
+                </div>
+                <p className="text-[11px] text-slate-400">
+                  When deployed on GitHub Pages or custom domain, enter your free API key from Google AI Studio here:
+                </p>
+                <div className="flex gap-2">
+                  <input
+                    type="password"
+                    placeholder="AIzaSy..."
+                    value={apiKeyInput}
+                    onChange={(e) => setApiKeyInput(e.target.value)}
+                    className="flex-1 bg-slate-900 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-white outline-none focus:border-indigo-500"
+                  />
+                  <button
+                    onClick={handleSaveApiKey}
+                    className="px-3.5 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg font-medium text-xs transition-all"
+                  >
+                    {apiKeySavedSuccess ? '✓ Saved!' : 'Save Key'}
+                  </button>
+                </div>
+              </div>
+
+              {/* Step by step deployment */}
+              <div className="space-y-3">
+                <h4 className="font-bold text-white text-sm">
+                  🚀 1-Click Deployment to Vercel (Recommended & Free):
+                </h4>
+                <ol className="list-decimal pl-5 space-y-1.5 text-slate-300">
+                  <li>Push your code to your GitHub repository.</li>
+                  <li>Go to <span className="text-cyan-400 font-semibold">vercel.com</span> (or netlify.com) and log in with GitHub.</li>
+                  <li>Click <span className="font-semibold text-white">"Add New Project"</span> and select your GitHub repo.</li>
+                  <li>In <strong>Environment Variables</strong>, add:
+                    <div className="bg-slate-950 p-2 rounded mt-1 font-mono text-[11px] text-emerald-400 border border-slate-800">
+                      GEMINI_API_KEY = your_gemini_api_key
+                    </div>
+                  </li>
+                  <li>Click <span className="font-semibold text-white">"Deploy"</span>! Your app is live with SSL HTTPS!</li>
+                  <li>To add your custom domain (e.g. <code>myvoiceapp.com</code>), go to <strong>Project Settings → Domains</strong> and type your domain name.</li>
+                </ol>
+              </div>
+
+              <div className="space-y-2 pt-2 border-t border-slate-800">
+                <h4 className="font-bold text-white text-sm">
+                  📦 GitHub Pages Option:
+                </h4>
+                <p className="text-slate-400 text-[11px]">
+                  GitHub by itself only stores the code. To enable GitHub Pages, go to your GitHub repository <strong>Settings → Pages → Build and deployment → Source: GitHub Actions (Vite)</strong>.
+                  We have added <code>base: './'</code> to <code>vite.config.ts</code> so all assets load properly on GitHub Pages!
+                </p>
+              </div>
+
             </div>
 
           </div>

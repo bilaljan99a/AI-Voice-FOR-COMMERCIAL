@@ -1,5 +1,5 @@
 import React, { useRef, useState, useEffect } from 'react';
-import { Play, Pause, Download, Volume2, Clock, Copy, Check, Music, Sparkles, Trash2 } from 'lucide-react';
+import { Play, Pause, Download, Volume2, Clock, Copy, Check, Music, Sparkles, Trash2, Gauge, Sliders } from 'lucide-react';
 import { GeneratedAudio } from '../types';
 import { SOUNDBED_TRACKS, soundbedPlayer } from '../utils/soundbedHelper';
 
@@ -15,6 +15,9 @@ export const AudioPlayer: React.FC<AudioPlayerProps> = ({ item, onDelete }) => {
   const [currentTime, setCurrentTime] = useState(0);
   const [copied, setCopied] = useState(false);
   
+  // Real-time playback speed control (0.75x to 1.75x)
+  const [currentSpeed, setCurrentSpeed] = useState<number>(item.speed || 1.0);
+
   // Soundbed background music state
   const [selectedBgm, setSelectedBgm] = useState<string>('none');
   const [bgmVolume, setBgmVolume] = useState<number>(0.2);
@@ -26,6 +29,8 @@ export const AudioPlayer: React.FC<AudioPlayerProps> = ({ item, onDelete }) => {
     const setAudioData = () => {
       setDuration(audio.duration || 0);
       setCurrentTime(audio.currentTime || 0);
+      // Ensure playback rate matches selected speed
+      audio.playbackRate = currentSpeed;
     };
 
     const setAudioTime = () => setCurrentTime(audio.currentTime);
@@ -44,7 +49,15 @@ export const AudioPlayer: React.FC<AudioPlayerProps> = ({ item, onDelete }) => {
       audio.removeEventListener('ended', setAudioEnded);
       soundbedPlayer.stop();
     };
-  }, [item.url]);
+  }, [item.url, currentSpeed]);
+
+  // Synchronize playback speed
+  const changeSpeed = (newSpeed: number) => {
+    setCurrentSpeed(newSpeed);
+    if (audioRef.current) {
+      audioRef.current.playbackRate = newSpeed;
+    }
+  };
 
   // Handle BGM volume changes
   useEffect(() => {
@@ -58,6 +71,7 @@ export const AudioPlayer: React.FC<AudioPlayerProps> = ({ item, onDelete }) => {
       soundbedPlayer.stop();
       setIsPlaying(false);
     } else {
+      audioRef.current.playbackRate = currentSpeed;
       audioRef.current.play();
       if (selectedBgm !== 'none') {
         soundbedPlayer.play(selectedBgm, bgmVolume);
@@ -112,7 +126,7 @@ export const AudioPlayer: React.FC<AudioPlayerProps> = ({ item, onDelete }) => {
               {item.isClonedVoice ? '🧬 Cloned' : item.voiceGender}
             </span>
             <span className="text-[10px] px-2 py-0.5 rounded-full bg-slate-800 text-slate-300 border border-slate-700 font-mono">
-              {item.speed}x
+              Speed: {currentSpeed.toFixed(2)}x
             </span>
             <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-950/60 text-amber-300 border border-amber-800/50">
               {item.energyLevel}
@@ -145,10 +159,11 @@ export const AudioPlayer: React.FC<AudioPlayerProps> = ({ item, onDelete }) => {
           <a
             href={item.url}
             download={`pakistani-ad-${item.voice}-${item.id}.wav`}
-            className="p-2 bg-indigo-600 text-white rounded-xl hover:bg-indigo-500 shadow-md shadow-indigo-900/30 transition-all text-xs"
+            className="p-2 bg-indigo-600 text-white rounded-xl hover:bg-indigo-500 shadow-md shadow-indigo-900/30 transition-all text-xs flex items-center gap-1"
             title="Download WAV Audio"
           >
             <Download size={14} />
+            <span className="text-[10px] font-semibold hidden xs:inline">WAV</span>
           </a>
 
           {onDelete && (
@@ -192,7 +207,31 @@ export const AudioPlayer: React.FC<AudioPlayerProps> = ({ item, onDelete }) => {
         </div>
       </div>
 
-      {/* Ad Studio Feature: Commercial Soundbed Mixer */}
+      {/* Speed Setting Pill Selector (Live Real-Time Speed Control) */}
+      <div className="flex items-center justify-between p-2 bg-slate-950/50 rounded-xl border border-slate-800/80 text-xs">
+        <div className="flex items-center gap-1.5 text-cyan-400">
+          <Gauge size={14} />
+          <span className="font-semibold text-slate-300 text-[11px]">Live Speed:</span>
+        </div>
+
+        <div className="flex items-center gap-1 overflow-x-auto no-scrollbar">
+          {[0.75, 0.9, 1.0, 1.15, 1.25, 1.5].map((s) => (
+            <button
+              key={s}
+              onClick={() => changeSpeed(s)}
+              className={`px-2 py-0.5 rounded-lg text-[10px] font-mono transition-all ${
+                Math.abs(currentSpeed - s) < 0.03
+                  ? 'bg-cyan-500 text-slate-950 font-bold shadow'
+                  : 'bg-slate-800 text-slate-400 hover:text-white'
+              }`}
+            >
+              {s}x
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Commercial Soundbed Mixer */}
       <div className="p-3 bg-slate-950/40 rounded-xl border border-slate-800/60 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 text-xs">
         <div className="flex items-center gap-2 text-slate-400">
           <Music size={14} className="text-indigo-400 flex-shrink-0" />
