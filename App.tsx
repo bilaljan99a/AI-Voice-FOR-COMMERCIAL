@@ -4,6 +4,7 @@ import { AudioPlayer } from './components/AudioPlayer';
 import { VoiceCloneStudio } from './components/VoiceCloneStudio';
 import {
   VoiceName,
+  VoiceGender,
   SpeechStyle,
   Language,
   GeneratedAudio,
@@ -11,8 +12,8 @@ import {
   CustomClonedVoice,
   AdTemplate,
 } from './types';
-import { generateSpeech, getActiveApiKey } from './services/geminiService';
-import { base64ToUint8Array, pcmToWavBlob } from './utils/audioHelper';
+import { generateSpeech, generateDialogueSpeech, getActiveApiKey } from './services/geminiService';
+import { base64ToUint8Array, pcmToWavBlob, parseDialogueScript } from './utils/audioHelper';
 import { enhanceVoiceAcoustics } from './utils/audioDsp';
 import { VOICE_CATALOG } from './data/voiceCatalog';
 import { PAKISTANI_AD_TEMPLATES } from './data/adTemplates';
@@ -33,7 +34,9 @@ import {
   Key,
   Globe,
   ExternalLink,
-  HelpCircle
+  HelpCircle,
+  Users,
+  UserCheck
 } from 'lucide-react';
 
 const LOCAL_STORAGE_CLONES_KEY = 'voicecraft_custom_cloned_voices_v1';
@@ -43,12 +46,20 @@ const App: React.FC = () => {
   // Mobile / View Mode: 'studio' | 'voices' | 'clone_lab' | 'templates' | 'history'
   const [activeTab, setActiveTab] = useState<'studio' | 'voices' | 'clone_lab' | 'templates' | 'history'>('studio');
 
-  // Controls state
+  // Studio Mode: 'single' | 'dual_dialogue'
+  const [generationMode, setGenerationMode] = useState<'single' | 'dual_dialogue'>('single');
+
+  // Single Voice controls state
   const [selectedVoice, setSelectedVoice] = useState<VoiceName>(VoiceName.Ayesha_Pak_Female);
   const [selectedStyle, setSelectedStyle] = useState<SpeechStyle>(SpeechStyle.Pakistani_Lawn_Beauty);
   const [selectedLanguage, setSelectedLanguage] = useState<Language>(Language.RomanUrdu);
   const [speechSpeed, setSpeechSpeed] = useState<number>(1.0);
   const [commercialEnergy, setCommercialEnergy] = useState<CommercialEnergy>('Balanced Commercial');
+
+  // Dual Character Dialogue state
+  const [dualMaleVoice, setDualMaleVoice] = useState<VoiceName>(VoiceName.Hamza_Pak_Male);
+  const [dualFemaleVoice, setDualFemaleVoice] = useState<VoiceName>(VoiceName.Ayesha_Pak_Female);
+  const [dialogueProgress, setDialogueProgress] = useState<string | null>(null);
 
   // API Key & Deployment Modal State
   const [showDeployModal, setShowDeployModal] = useState<boolean>(false);
@@ -67,11 +78,20 @@ const App: React.FC = () => {
     }
   });
   const [activeCustomVoice, setActiveCustomVoice] = useState<CustomClonedVoice | null>(null);
+  const [activeMaleClonedVoice, setActiveMaleClonedVoice] = useState<CustomClonedVoice | null>(null);
+  const [activeFemaleClonedVoice, setActiveFemaleClonedVoice] = useState<CustomClonedVoice | null>(null);
 
   // Content state
   const [text, setText] = useState<string>(
     'Khubsurati jo dilon ko moh le... Noor Fashion ki nayi Festive Lawn Collection ab dastyab hai tamam leading stores par. Sajaiye apna har pal, ba-waqar andaaz mein.'
   );
+  const [dialogueText, setDialogueText] = useState<string>(
+    `Male: Suno Ayesha! Is Bari Eid par Mega Mart par pure 50% discount ka sab se bara dhamaka shuru ho gaya hai!
+Female: Sach mein Hamza? Pure pachas feesad? Phir to humein abhi chalna chahiye shopping ke liye!
+Male: Bilkul! Har brand aur har item par bachat. Stock mehdood hai, aaj hi tashreef laayein!
+Female: To der kis baat ki! Aaj hi tashreef laayein aur bachat ka faida uthayein!`
+  );
+
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [generatedList, setGeneratedList] = useState<GeneratedAudio[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -90,7 +110,15 @@ const App: React.FC = () => {
   const handleAddCustomVoice = (voice: CustomClonedVoice) => {
     setCustomVoices((prev) => [voice, ...prev]);
     setActiveCustomVoice(voice);
-    setSelectedVoice(VoiceName.Custom_Cloned);
+    if (voice.gender === 'Male') {
+      setActiveMaleClonedVoice(voice);
+      setDualMaleVoice(VoiceName.Custom_Cloned);
+      setSelectedVoice(VoiceName.Custom_Cloned);
+    } else {
+      setActiveFemaleClonedVoice(voice);
+      setDualFemaleVoice(VoiceName.Custom_Cloned);
+      setSelectedVoice(VoiceName.Custom_Cloned);
+    }
   };
 
   const handleDeleteCustomVoice = (id: string) => {
@@ -99,11 +127,42 @@ const App: React.FC = () => {
       setActiveCustomVoice(null);
       setSelectedVoice(VoiceName.Ayesha_Pak_Female);
     }
+    if (activeMaleClonedVoice?.id === id) {
+      setActiveMaleClonedVoice(null);
+      setDualMaleVoice(VoiceName.Hamza_Pak_Male);
+    }
+    if (activeFemaleClonedVoice?.id === id) {
+      setActiveFemaleClonedVoice(null);
+      setDualFemaleVoice(VoiceName.Ayesha_Pak_Female);
+    }
   };
 
   const handleSelectClonedVoice = (voice: CustomClonedVoice) => {
     setActiveCustomVoice(voice);
     setSelectedVoice(VoiceName.Custom_Cloned);
+    if (voice.gender === 'Male') {
+      setActiveMaleClonedVoice(voice);
+      setDualMaleVoice(VoiceName.Custom_Cloned);
+    } else {
+      setActiveFemaleClonedVoice(voice);
+      setDualFemaleVoice(VoiceName.Custom_Cloned);
+    }
+    setActiveTab('studio');
+  };
+
+  // 2-in-1 Dual Clones & Transcribed Dialogue Loader
+  const handleLoadDualClonesAndDialogue = (
+    maleVoice: CustomClonedVoice,
+    femaleVoice: CustomClonedVoice,
+    dialogueScript: string
+  ) => {
+    setActiveMaleClonedVoice(maleVoice);
+    setActiveFemaleClonedVoice(femaleVoice);
+    setActiveCustomVoice(maleVoice);
+    setDualMaleVoice(VoiceName.Custom_Cloned);
+    setDualFemaleVoice(VoiceName.Custom_Cloned);
+    setDialogueText(dialogueScript);
+    setGenerationMode('dual_dialogue');
     setActiveTab('studio');
   };
 
@@ -115,16 +174,24 @@ const App: React.FC = () => {
 
   // Load an ad template
   const applyAdTemplate = (template: AdTemplate) => {
-    setText(template.script);
+    if (template.isDialogue) {
+      setGenerationMode('dual_dialogue');
+      setDialogueText(template.script);
+      setDualMaleVoice(template.suggestedVoice);
+      if (template.suggestedFemaleVoice) setDualFemaleVoice(template.suggestedFemaleVoice);
+    } else {
+      setGenerationMode('single');
+      setText(template.script);
+      setSelectedVoice(template.suggestedVoice);
+    }
     setSelectedLanguage(template.language);
-    setSelectedVoice(template.suggestedVoice);
     setSelectedStyle(template.suggestedStyle);
     setSpeechSpeed(template.suggestedSpeed);
     setShowTemplateModal(false);
     setActiveTab('studio');
   };
 
-  // Save custom API key for GitHub Pages or Custom domain usage
+  // Save custom API key
   const handleSaveApiKey = () => {
     if (apiKeyInput.trim()) {
       localStorage.setItem(LOCAL_STORAGE_KEY_STORAGE, apiKeyInput.trim());
@@ -143,69 +210,124 @@ const App: React.FC = () => {
     }
   };
 
-  // Handle TTS Generation
+  // Handle Generation (Single Voice OR Dual-Character Dialogue)
   const handleGenerate = async () => {
-    if (!text.trim()) return;
-
     setIsLoading(true);
     setError(null);
+    setDialogueProgress(null);
 
     try {
-      // 1. Call Gemini TTS API with natural human styling
-      const base64Audio = await generateSpeech(
-        text,
-        selectedVoice,
-        selectedStyle,
-        selectedLanguage,
-        speechSpeed,
-        commercialEnergy,
-        selectedVoice === VoiceName.Custom_Cloned ? activeCustomVoice : null
-      );
+      if (generationMode === 'dual_dialogue') {
+        // --- DUAL CHARACTER DIALOGUE GENERATION ---
+        const maleVoiceObj = VOICE_CATALOG.find((v) => v.id === dualMaleVoice);
+        const femaleVoiceObj = VOICE_CATALOG.find((v) => v.id === dualFemaleVoice);
 
-      // 2. Wrap PCM in pure 24kHz WAV container
-      const pcmData = base64ToUint8Array(base64Audio);
-      const rawWavBlob = pcmToWavBlob(pcmData);
+        const customMale = dualMaleVoice === VoiceName.Custom_Cloned
+          ? (activeMaleClonedVoice || (activeCustomVoice?.gender === 'Male' ? activeCustomVoice : null))
+          : null;
+        const customFemale = dualFemaleVoice === VoiceName.Custom_Cloned
+          ? (activeFemaleClonedVoice || (activeCustomVoice?.gender === 'Female' ? activeCustomVoice : null))
+          : null;
 
-      // 3. Gentle broadcast mastering limiting (NO robotic pitch or speed distortion)
-      const cleanWavBlob = await enhanceVoiceAcoustics(rawWavBlob);
-      const audioUrl = URL.createObjectURL(cleanWavBlob);
+        const maleName = customMale ? customMale.name : maleVoiceObj?.name || 'Male Speaker';
+        const femaleName = customFemale ? customFemale.name : femaleVoiceObj?.name || 'Female Speaker';
 
-      // Voice display info
-      let voiceDisplayName = 'Ayesha (Pakistani Beauty)';
-      let voiceGender: 'Male' | 'Female' | 'Cloned' = 'Female';
-
-      if (selectedVoice === VoiceName.Custom_Cloned && activeCustomVoice) {
-        voiceDisplayName = `🧬 ${activeCustomVoice.name}`;
-        voiceGender = activeCustomVoice.gender;
-      } else {
-        const found = VOICE_CATALOG.find((v) => v.id === selectedVoice);
-        if (found) {
-          voiceDisplayName = found.name;
-          voiceGender = found.gender;
+        const lines = parseDialogueScript(dialogueText, maleName, femaleName);
+        if (lines.length === 0) {
+          throw new Error('Please enter at least one dialogue line in Male: ... and Female: ... format');
         }
+
+        const combinedWavBlob = await generateDialogueSpeech(
+          lines,
+          dualMaleVoice,
+          dualFemaleVoice,
+          selectedStyle,
+          selectedLanguage,
+          speechSpeed,
+          commercialEnergy,
+          customMale,
+          customFemale,
+          (curr, tot) => {
+            const line = lines[curr - 1];
+            setDialogueProgress(`Generating line ${curr} of ${tot} (${line.speaker === 'male' ? '👨 ' + maleName : '👩 ' + femaleName})...`);
+          }
+        );
+
+        const cleanWavBlob = await enhanceVoiceAcoustics(combinedWavBlob);
+        const audioUrl = URL.createObjectURL(cleanWavBlob);
+
+        const newAudio: GeneratedAudio = {
+          id: Date.now().toString(),
+          textSnippet: dialogueText.slice(0, 70) + (dialogueText.length > 70 ? '...' : ''),
+          fullText: dialogueText,
+          url: audioUrl,
+          timestamp: Date.now(),
+          voice: dualMaleVoice,
+          voiceDisplayName: `🎭 ${maleName} + ${femaleName}`,
+          voiceGender: 'Dual_Dialogue',
+          style: selectedStyle,
+          language: selectedLanguage,
+          speed: speechSpeed,
+          energyLevel: commercialEnergy,
+          isDialogue: true,
+          maleVoiceName: maleName,
+          femaleVoiceName: femaleName,
+        };
+
+        setGeneratedList((prev) => [newAudio, ...prev]);
+      } else {
+        // --- SINGLE VOICE GENERATION ---
+        if (!text.trim()) return;
+
+        const base64Audio = await generateSpeech(
+          text,
+          selectedVoice,
+          selectedStyle,
+          selectedLanguage,
+          speechSpeed,
+          commercialEnergy,
+          selectedVoice === VoiceName.Custom_Cloned ? activeCustomVoice : null
+        );
+
+        const pcmData = base64ToUint8Array(base64Audio);
+        const rawWavBlob = pcmToWavBlob(pcmData);
+        const cleanWavBlob = await enhanceVoiceAcoustics(rawWavBlob);
+        const audioUrl = URL.createObjectURL(cleanWavBlob);
+
+        let voiceDisplayName = 'Ayesha (Pakistani Beauty)';
+        let voiceGender: VoiceGender = 'Female';
+
+        if (selectedVoice === VoiceName.Custom_Cloned && activeCustomVoice) {
+          voiceDisplayName = `🧬 ${activeCustomVoice.name}`;
+          voiceGender = activeCustomVoice.gender;
+        } else {
+          const found = VOICE_CATALOG.find((v) => v.id === selectedVoice);
+          if (found) {
+            voiceDisplayName = found.name;
+            voiceGender = found.gender;
+          }
+        }
+
+        const newAudio: GeneratedAudio = {
+          id: Date.now().toString(),
+          textSnippet: text.slice(0, 65) + (text.length > 65 ? '...' : ''),
+          fullText: text,
+          url: audioUrl,
+          timestamp: Date.now(),
+          voice: selectedVoice,
+          voiceDisplayName,
+          voiceGender,
+          style: selectedStyle,
+          language: selectedLanguage,
+          speed: speechSpeed,
+          energyLevel: commercialEnergy,
+          isClonedVoice: selectedVoice === VoiceName.Custom_Cloned,
+          clonedVoiceName: activeCustomVoice?.name,
+        };
+
+        setGeneratedList((prev) => [newAudio, ...prev]);
       }
 
-      // 4. Update State
-      const newAudio: GeneratedAudio = {
-        id: Date.now().toString(),
-        textSnippet: text.slice(0, 65) + (text.length > 65 ? '...' : ''),
-        fullText: text,
-        url: audioUrl,
-        timestamp: Date.now(),
-        voice: selectedVoice,
-        voiceDisplayName,
-        voiceGender,
-        style: selectedStyle,
-        language: selectedLanguage,
-        speed: speechSpeed,
-        energyLevel: commercialEnergy,
-        isClonedVoice: selectedVoice === VoiceName.Custom_Cloned,
-        clonedVoiceName: activeCustomVoice?.name,
-      };
-
-      setGeneratedList((prev) => [newAudio, ...prev]);
-
-      // Automatically switch to history view on mobile
       if (window.innerWidth < 768) {
         setActiveTab('history');
       }
@@ -214,10 +336,11 @@ const App: React.FC = () => {
       const errorMessage =
         err instanceof Error
           ? err.message
-          : 'Failed to generate commercial speech. Please try again or simplify script.';
+          : 'Failed to generate commercial audio. Please try again or simplify script.';
       setError(errorMessage);
     } finally {
       setIsLoading(false);
+      setDialogueProgress(null);
     }
   };
 
@@ -225,8 +348,8 @@ const App: React.FC = () => {
     setGeneratedList((prev) => prev.filter((item) => item.id !== id));
   };
 
-  // Determine if text is Urdu / Arabic script
-  const isUrduScript = /[\u0600-\u06FF]/.test(text);
+  const currentContent = generationMode === 'dual_dialogue' ? dialogueText : text;
+  const isUrduScript = /[\u0600-\u06FF]/.test(currentContent);
 
   return (
     <div className="min-h-[100dvh] bg-slate-950 text-slate-100 flex flex-col font-sans selection:bg-indigo-500 selection:text-white">
@@ -245,11 +368,11 @@ const App: React.FC = () => {
                   VoiceCraft <span className="text-emerald-400">Studio</span>
                 </h1>
                 <span className="hidden sm:inline-block text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-300 border border-emerald-500/20 font-medium">
-                  Natural Human Commercial Voice AI
+                  Male + Female Dual Dialogue AI
                 </span>
               </div>
               <p className="text-[11px] text-slate-400 hidden xs:block">
-                Authentic Male & Female Voices • Pakistani Commercial Ads • Deploy Anywhere
+                Authentic Voice Cloning • 2-Character Male & Female Commercials • 100% Natural Speech
               </p>
             </div>
           </div>
@@ -287,7 +410,7 @@ const App: React.FC = () => {
               className="px-3.5 py-1.5 rounded-xl bg-slate-850 text-slate-300 hover:bg-slate-800 transition-all flex items-center gap-1.5"
             >
               <FileText size={13} className="text-amber-400" />
-              Ad Templates
+              Ad Templates (Dialogue & Single)
             </button>
             <button
               onClick={() => setShowDeployModal(true)}
@@ -377,6 +500,7 @@ const App: React.FC = () => {
                 selectedClonedVoiceId={activeCustomVoice?.id || null}
                 onSelectCatalogVoice={handleSelectCatalogVoice}
                 currentVoiceId={selectedVoice}
+                onLoadDualClonesAndDialogue={handleLoadDualClonesAndDialogue}
               />
             </div>
           )}
@@ -406,11 +530,13 @@ const App: React.FC = () => {
                     <div>
                       <div className="flex items-center justify-between gap-2 mb-2">
                         <h4 className="font-bold text-white text-sm">{tpl.title}</h4>
-                        <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-300 border border-amber-500/20 font-medium">
-                          {tpl.category}
+                        <span className={`text-[10px] px-2 py-0.5 rounded-full font-medium ${
+                          tpl.isDialogue ? 'bg-purple-500/20 text-purple-300 border border-purple-500/30' : 'bg-amber-500/10 text-amber-300 border border-amber-500/20'
+                        }`}>
+                          {tpl.isDialogue ? '🎭 Dual Dialogue' : tpl.brandType}
                         </span>
                       </div>
-                      <p className="text-xs text-slate-300 leading-relaxed mb-4 italic">
+                      <p className="text-xs text-slate-300 leading-relaxed mb-4 italic whitespace-pre-line">
                         "{tpl.script}"
                       </p>
                     </div>
@@ -434,42 +560,180 @@ const App: React.FC = () => {
 
           {/* VIEW 3: STUDIO SCRIPT INPUT & GENERATOR */}
           {(activeTab === 'studio' || (activeTab !== 'clone_lab' && activeTab !== 'templates' && activeTab !== 'voices' && activeTab !== 'history')) && (
-            <div className="flex-1 flex flex-col gap-6 max-w-4xl mx-auto w-full">
+            <div className="flex-1 flex flex-col gap-5 max-w-4xl mx-auto w-full">
               
-              {/* Active Voice Pill Banner */}
-              <div className="flex items-center justify-between p-3 rounded-2xl bg-slate-900/80 border border-slate-800/80 shadow-md">
-                <div className="flex items-center gap-2.5 overflow-hidden">
-                  <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center text-white text-xs flex-shrink-0">
-                    {selectedVoice === VoiceName.Custom_Cloned ? '🧬' : '🎙️'}
-                  </div>
-                  <div className="min-w-0">
-                    <span className="text-xs font-bold text-white truncate block">
-                      {selectedVoice === VoiceName.Custom_Cloned && activeCustomVoice
-                        ? `Cloned: ${activeCustomVoice.name}`
-                        : VOICE_CATALOG.find((v) => v.id === selectedVoice)?.name || selectedVoice}
-                    </span>
-                    <span className="text-[10px] text-indigo-400 block truncate">
-                      {selectedStyle} • {speechSpeed.toFixed(2)}x Speed • {commercialEnergy}
-                    </span>
-                  </div>
-                </div>
-
-                <div className="flex items-center gap-1.5 flex-shrink-0">
-                  <button
-                    onClick={() => setActiveTab('voices')}
-                    className="md:hidden text-xs text-slate-300 hover:text-white px-2.5 py-1 rounded-lg bg-slate-800 border border-slate-700"
-                  >
-                    Change Voice
-                  </button>
-                  <button
-                    onClick={() => setShowTemplateModal(true)}
-                    className="text-xs text-amber-300 hover:text-amber-200 px-2.5 py-1 rounded-lg bg-amber-500/10 border border-amber-500/20 flex items-center gap-1"
-                  >
-                    <FileText size={12} />
-                    <span className="hidden sm:inline">Pakistani</span> Scripts
-                  </button>
-                </div>
+              {/* Studio Commercial Mode Switcher: Single vs Dual Character Dialogue */}
+              <div className="grid grid-cols-2 p-1 bg-slate-900/90 border border-slate-800 rounded-2xl shadow-lg">
+                <button
+                  onClick={() => setGenerationMode('single')}
+                  className={`py-2.5 px-4 rounded-xl text-xs sm:text-sm font-bold flex items-center justify-center gap-2 transition-all ${
+                    generationMode === 'single'
+                      ? 'bg-gradient-to-r from-indigo-600 to-purple-600 text-white shadow-md'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  <MessageSquareText size={16} />
+                  Single Voice Commercial
+                </button>
+                <button
+                  onClick={() => setGenerationMode('dual_dialogue')}
+                  className={`py-2.5 px-4 rounded-xl text-xs sm:text-sm font-bold flex items-center justify-center gap-2 transition-all ${
+                    generationMode === 'dual_dialogue'
+                      ? 'bg-gradient-to-r from-purple-600 to-pink-600 text-white shadow-md'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  <Users size={16} />
+                  🎭 Dual Dialogue (Male + Female)
+                </button>
               </div>
+
+              {/* DUAL CHARACTER CONTROLS BANNER (When in Dual Dialogue Mode) */}
+              {generationMode === 'dual_dialogue' ? (
+                <div className="p-4 bg-purple-950/30 border border-purple-500/40 rounded-2xl space-y-3 animate-in fade-in">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold text-purple-300 flex items-center gap-1.5">
+                      <Users size={16} className="text-purple-400" />
+                      Two-Character Commercial Dialogue Cast
+                    </span>
+                    <button
+                      onClick={() => setShowTemplateModal(true)}
+                      className="text-[11px] text-amber-300 bg-amber-500/10 px-2.5 py-1 rounded-lg border border-amber-500/20 hover:bg-amber-500/20"
+                    >
+                      Load Dialogue Preset
+                    </button>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    
+                    {/* Male Character Selector */}
+                    <div className="bg-slate-900/80 p-3 rounded-xl border border-blue-900/50">
+                      <label className="block text-[11px] font-semibold text-blue-300 mb-1 flex items-center justify-between">
+                        <span>👨 Character 1 (Male Voice)</span>
+                        {dualMaleVoice === VoiceName.Custom_Cloned && activeMaleClonedVoice && (
+                          <span className="text-[10px] text-blue-400 bg-blue-500/10 px-1.5 py-0.2 rounded font-mono truncate max-w-[120px]">
+                            🧬 {activeMaleClonedVoice.name}
+                          </span>
+                        )}
+                      </label>
+                      <select
+                        value={dualMaleVoice === VoiceName.Custom_Cloned && activeMaleClonedVoice ? activeMaleClonedVoice.id : dualMaleVoice}
+                        onChange={(e) => {
+                          const val = e.target.value;
+                          if (val.startsWith('clone-')) {
+                            const found = customVoices.find((v) => v.id === val);
+                            if (found) {
+                              setActiveMaleClonedVoice(found);
+                              setDualMaleVoice(VoiceName.Custom_Cloned);
+                            }
+                          } else {
+                            setDualMaleVoice(val as VoiceName);
+                          }
+                        }}
+                        className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2 text-xs text-white outline-none focus:border-blue-500"
+                      >
+                        <optgroup label="🇵🇰 Studio Models">
+                          {VOICE_CATALOG.filter((v) => v.gender === 'Male').map((v) => (
+                            <option key={v.id} value={v.id}>
+                              {v.name} ({v.tagline})
+                            </option>
+                          ))}
+                        </optgroup>
+                        {customVoices.filter(v => v.gender === 'Male').length > 0 && (
+                          <optgroup label="🧬 Cloned Male Voices">
+                            {customVoices.filter(v => v.gender === 'Male').map((cv) => (
+                              <option key={cv.id} value={cv.id}>
+                                🧬 Cloned: {cv.name} ({cv.pitchCategory || `${cv.estimatedPitchHz} Hz`})
+                              </option>
+                            ))}
+                          </optgroup>
+                        )}
+                      </select>
+                    </div>
+
+                    {/* Female Character Selector */}
+                    <div className="bg-slate-900/80 p-3 rounded-xl border border-pink-900/50">
+                      <label className="block text-[11px] font-semibold text-pink-300 mb-1 flex items-center justify-between">
+                        <span>👩 Character 2 (Female Voice)</span>
+                        {dualFemaleVoice === VoiceName.Custom_Cloned && activeFemaleClonedVoice && (
+                          <span className="text-[10px] text-pink-400 bg-pink-500/10 px-1.5 py-0.2 rounded font-mono truncate max-w-[120px]">
+                            🧬 {activeFemaleClonedVoice.name}
+                          </span>
+                        )}
+                      </label>
+                      <select
+                        value={dualFemaleVoice === VoiceName.Custom_Cloned && activeFemaleClonedVoice ? activeFemaleClonedVoice.id : dualFemaleVoice}
+                        onChange={(e) => {
+                          const val = e.target.value;
+                          if (val.startsWith('clone-')) {
+                            const found = customVoices.find((v) => v.id === val);
+                            if (found) {
+                              setActiveFemaleClonedVoice(found);
+                              setDualFemaleVoice(VoiceName.Custom_Cloned);
+                            }
+                          } else {
+                            setDualFemaleVoice(val as VoiceName);
+                          }
+                        }}
+                        className="w-full bg-slate-950 border border-slate-700 rounded-lg p-2 text-xs text-white outline-none focus:border-pink-500"
+                      >
+                        <optgroup label="🇵🇰 Studio Models">
+                          {VOICE_CATALOG.filter((v) => v.gender === 'Female').map((v) => (
+                            <option key={v.id} value={v.id}>
+                              {v.name} ({v.tagline})
+                            </option>
+                          ))}
+                        </optgroup>
+                        {customVoices.filter(v => v.gender === 'Female').length > 0 && (
+                          <optgroup label="🧬 Cloned Female Voices">
+                            {customVoices.filter(v => v.gender === 'Female').map((cv) => (
+                              <option key={cv.id} value={cv.id}>
+                                🧬 Cloned: {cv.name} ({cv.pitchCategory || `${cv.estimatedPitchHz} Hz`})
+                              </option>
+                            ))}
+                          </optgroup>
+                        )}
+                      </select>
+                    </div>
+
+                  </div>
+                </div>
+              ) : (
+                /* SINGLE CHARACTER BANNER */
+                <div className="flex items-center justify-between p-3 rounded-2xl bg-slate-900/80 border border-slate-800/80 shadow-md">
+                  <div className="flex items-center gap-2.5 overflow-hidden">
+                    <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center text-white text-xs flex-shrink-0">
+                      {selectedVoice === VoiceName.Custom_Cloned ? '🧬' : '🎙️'}
+                    </div>
+                    <div className="min-w-0">
+                      <span className="text-xs font-bold text-white truncate block">
+                        {selectedVoice === VoiceName.Custom_Cloned && activeCustomVoice
+                          ? `Cloned: ${activeCustomVoice.name}`
+                          : VOICE_CATALOG.find((v) => v.id === selectedVoice)?.name || selectedVoice}
+                      </span>
+                      <span className="text-[10px] text-indigo-400 block truncate">
+                        {selectedStyle} • {speechSpeed.toFixed(2)}x Speed • {commercialEnergy}
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-1.5 flex-shrink-0">
+                    <button
+                      onClick={() => setActiveTab('voices')}
+                      className="md:hidden text-xs text-slate-300 hover:text-white px-2.5 py-1 rounded-lg bg-slate-800 border border-slate-700"
+                    >
+                      Change Voice
+                    </button>
+                    <button
+                      onClick={() => setShowTemplateModal(true)}
+                      className="text-xs text-amber-300 hover:text-amber-200 px-2.5 py-1 rounded-lg bg-amber-500/10 border border-amber-500/20 flex items-center gap-1"
+                    >
+                      <FileText size={12} />
+                      <span className="hidden sm:inline">Pakistani</span> Scripts
+                    </button>
+                  </div>
+                </div>
+              )}
 
               {/* Script Input Card */}
               <div className="bg-slate-900/90 rounded-2xl border border-slate-700/80 shadow-2xl focus-within:ring-2 focus-within:ring-indigo-500/40 flex flex-col transition-all">
@@ -477,17 +741,19 @@ const App: React.FC = () => {
                 {/* Textarea Header */}
                 <div className="px-4 py-3 border-b border-slate-800/80 flex items-center justify-between text-xs text-slate-400">
                   <div className="flex items-center gap-2">
-                    <MessageSquareText size={16} className="text-indigo-400" />
-                    <span className="font-medium text-slate-200">Commercial Script</span>
+                    {generationMode === 'dual_dialogue' ? <Users size={16} className="text-purple-400" /> : <MessageSquareText size={16} className="text-indigo-400" />}
+                    <span className="font-semibold text-slate-200">
+                      {generationMode === 'dual_dialogue' ? 'Dual-Character Script (Male: ... & Female: ...)' : 'Commercial Script'}
+                    </span>
                   </div>
                   <div className="flex items-center gap-3">
                     {isUrduScript && (
                       <span className="text-[10px] text-emerald-400 font-mono bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/20">
-                        Urdu Script Detected
+                        Urdu Script
                       </span>
                     )}
                     <span className="font-mono text-slate-500 text-[11px]">
-                      {text.length} / 2000 chars
+                      {currentContent.length} / 2500 chars
                     </span>
                   </div>
                 </div>
@@ -497,91 +763,104 @@ const App: React.FC = () => {
                   className={`w-full min-h-[160px] sm:min-h-[200px] bg-transparent p-4 sm:p-5 text-base sm:text-lg text-slate-100 placeholder-slate-600 outline-none resize-none leading-relaxed font-light ${
                     isUrduScript ? 'font-serif text-right text-xl leading-loose' : 'font-sans'
                   }`}
-                  placeholder={`Enter your commercial script in Urdu, Roman Urdu, Hindi or English...\n\nExample:\n"Khushkhabri! Is Bari Eid par sab se bara Dhamaka Offer! Pure 50% tak ki bachat. Stock mehdood hai, aaj hi tashreef laayein!"`}
-                  value={text}
-                  onChange={(e) => setText(e.target.value)}
-                  maxLength={2000}
+                  placeholder={
+                    generationMode === 'dual_dialogue'
+                      ? `Write dialogue lines with Male: and Female: prefix:\n\nMale: Suno Ayesha! Is Eid par Mega Mart par 50% discount hai!\nFemale: Sach mein Hamza? Phir to abhi shopping ke liye chalte hain!\nMale: Bilkul! Har brand par bari bachat!`
+                      : `Enter your commercial script in Urdu, Roman Urdu, Hindi or English...\n\nExample:\n"Khushkhabri! Is Bari Eid par laya hai Mega Mart sab se bara Dhamaka Offer! Pure 50% tak ki bachat. Stock mehdood hai, aaj hi tashreef laayein!"`
+                  }
+                  value={generationMode === 'dual_dialogue' ? dialogueText : text}
+                  onChange={(e) => {
+                    if (generationMode === 'dual_dialogue') setDialogueText(e.target.value);
+                    else setText(e.target.value);
+                  }}
+                  maxLength={2500}
                 />
 
-                {/* Quick Script Preset Buttons */}
+                {/* Quick Presets Bar */}
                 <div className="px-4 py-2 bg-slate-950/60 border-t border-slate-800 flex items-center gap-2 overflow-x-auto no-scrollbar text-xs">
-                  <span className="text-slate-500 text-[10px] whitespace-nowrap">Load Preset:</span>
-                  <button
-                    onClick={() => applyAdTemplate(PAKISTANI_AD_TEMPLATES[3])}
-                    className="px-2.5 py-1 rounded-lg bg-pink-950/50 hover:bg-pink-900/60 text-pink-300 border border-pink-800/40 whitespace-nowrap text-[11px]"
-                  >
-                    👩 Ayesha (Beauty & Lawn)
-                  </button>
-                  <button
-                    onClick={() => applyAdTemplate(PAKISTANI_AD_TEMPLATES[1])}
-                    className="px-2.5 py-1 rounded-lg bg-emerald-950/50 hover:bg-emerald-900/60 text-emerald-300 border border-emerald-800/40 whitespace-nowrap text-[11px]"
-                  >
-                    👩 Maryam (Shaahi Chai)
-                  </button>
-                  <button
-                    onClick={() => applyAdTemplate(PAKISTANI_AD_TEMPLATES[0])}
-                    className="px-2.5 py-1 rounded-lg bg-slate-850 hover:bg-slate-800 text-slate-300 whitespace-nowrap text-[11px]"
-                  >
-                    👨 Hamza (Dhamaka Sale)
-                  </button>
-                  <button
-                    onClick={() => applyAdTemplate(PAKISTANI_AD_TEMPLATES[2])}
-                    className="px-2.5 py-1 rounded-lg bg-slate-850 hover:bg-slate-800 text-slate-300 whitespace-nowrap text-[11px]"
-                  >
-                    👨 Tariq (Real Estate)
-                  </button>
-                </div>
-
-                {/* Speed Setting Quick Bar */}
-                <div className="px-4 py-2.5 bg-slate-900/40 border-t border-slate-800 flex flex-wrap items-center justify-between gap-2 text-xs">
-                  <div className="flex items-center gap-2 text-cyan-400 font-mono">
-                    <Gauge size={14} />
-                    <span>Speed: {speechSpeed.toFixed(2)}x (Natural Pitch-Preserved)</span>
-                  </div>
-
-                  <div className="flex items-center gap-1 text-[11px] text-slate-400">
-                    <span>Quick Speed:</span>
-                    {[0.85, 1.0, 1.15, 1.3].map((s) => (
+                  <span className="text-slate-500 text-[10px] whitespace-nowrap">1-Click Presets:</span>
+                  {generationMode === 'dual_dialogue' ? (
+                    <>
                       <button
-                        key={s}
-                        onClick={() => setSpeechSpeed(s)}
-                        className={`px-2 py-0.5 rounded text-[10px] font-mono ${
-                          Math.abs(speechSpeed - s) < 0.03
-                            ? 'bg-cyan-500 text-slate-950 font-bold'
-                            : 'bg-slate-800 text-slate-300 hover:text-white'
-                        }`}
+                        onClick={() => applyAdTemplate(PAKISTANI_AD_TEMPLATES[0])}
+                        className="px-2.5 py-1 rounded-lg bg-purple-950/60 hover:bg-purple-900/60 text-purple-300 border border-purple-800/40 whitespace-nowrap text-[11px]"
                       >
-                        {s}x
+                        ☕ Shaahi Chai Dialogue
                       </button>
-                    ))}
-                  </div>
+                      <button
+                        onClick={() => applyAdTemplate(PAKISTANI_AD_TEMPLATES[1])}
+                        className="px-2.5 py-1 rounded-lg bg-pink-950/60 hover:bg-pink-900/60 text-pink-300 border border-pink-800/40 whitespace-nowrap text-[11px]"
+                      >
+                        💥 Eid Sale Shopping Dialogue
+                      </button>
+                      <button
+                        onClick={() => applyAdTemplate(PAKISTANI_AD_TEMPLATES[2])}
+                        className="px-2.5 py-1 rounded-lg bg-blue-950/60 hover:bg-blue-900/60 text-blue-300 border border-blue-800/40 whitespace-nowrap text-[11px]"
+                      >
+                        🍕 20-Min Delivery Dialogue
+                      </button>
+                      <button
+                        onClick={() => applyAdTemplate(PAKISTANI_AD_TEMPLATES[3])}
+                        className="px-2.5 py-1 rounded-lg bg-emerald-950/60 hover:bg-emerald-900/60 text-emerald-300 border border-emerald-800/40 whitespace-nowrap text-[11px]"
+                      >
+                        🏙️ Housing Scheme Dialogue
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <button
+                        onClick={() => applyAdTemplate(PAKISTANI_AD_TEMPLATES[6])}
+                        className="px-2.5 py-1 rounded-lg bg-pink-950/50 hover:bg-pink-900/60 text-pink-300 border border-pink-800/40 whitespace-nowrap text-[11px]"
+                      >
+                        👩 Ayesha (Beauty & Lawn)
+                      </button>
+                      <button
+                        onClick={() => applyAdTemplate(PAKISTANI_AD_TEMPLATES[5])}
+                        className="px-2.5 py-1 rounded-lg bg-emerald-950/50 hover:bg-emerald-900/60 text-emerald-300 border border-emerald-800/40 whitespace-nowrap text-[11px]"
+                      >
+                        👩 Maryam (Shaahi Chai)
+                      </button>
+                      <button
+                        onClick={() => applyAdTemplate(PAKISTANI_AD_TEMPLATES[4])}
+                        className="px-2.5 py-1 rounded-lg bg-slate-850 hover:bg-slate-800 text-slate-300 whitespace-nowrap text-[11px]"
+                      >
+                        👨 Hamza (Dhamaka Sale)
+                      </button>
+                    </>
+                  )}
                 </div>
 
                 {/* Generate Action Bar */}
                 <div className="p-4 border-t border-slate-800 bg-slate-900/60 rounded-b-2xl flex flex-col sm:flex-row items-center justify-between gap-3">
                   <div className="flex items-center gap-2 text-xs text-slate-400">
                     <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-                    <span>Gemini TTS Human Voice Ready</span>
+                    <span>
+                      {generationMode === 'dual_dialogue'
+                        ? 'Dual Character Voice Synthesizer Ready'
+                        : 'Gemini Natural Human Voice Ready'}
+                    </span>
                   </div>
 
                   <button
                     onClick={handleGenerate}
-                    disabled={isLoading || !text.trim()}
+                    disabled={isLoading || !(generationMode === 'dual_dialogue' ? dialogueText.trim() : text.trim())}
                     className={`w-full sm:w-auto flex items-center justify-center gap-2 px-8 py-3.5 rounded-xl font-bold text-sm transition-all shadow-xl transform active:scale-95 ${
-                      isLoading || !text.trim()
+                      isLoading || !(generationMode === 'dual_dialogue' ? dialogueText.trim() : text.trim())
                         ? 'bg-slate-800 text-slate-500 cursor-not-allowed border border-slate-700'
+                        : generationMode === 'dual_dialogue'
+                        ? 'bg-gradient-to-r from-purple-600 via-pink-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white shadow-purple-900/50'
                         : 'bg-gradient-to-r from-emerald-600 via-indigo-600 to-purple-600 hover:from-emerald-500 hover:to-purple-500 text-white shadow-indigo-900/50'
                     }`}
                   >
                     {isLoading ? (
                       <>
                         <Loader2 size={18} className="animate-spin text-white" />
-                        Generating Natural Audio...
+                        {dialogueProgress || 'Synthesizing Commercial Audio...'}
                       </>
                     ) : (
                       <>
                         <Sparkles size={18} />
-                        Generate Commercial Audio
+                        {generationMode === 'dual_dialogue' ? 'Generate Dialogue Commercial' : 'Generate Commercial Audio'}
                       </>
                     )}
                   </button>
@@ -603,12 +882,12 @@ const App: React.FC = () => {
                 </div>
               )}
 
-              {/* Generated Audio Section (Center preview for recent items) */}
+              {/* Generated Audio Section */}
               <div className="space-y-3 pt-2">
                 <div className="flex items-center justify-between">
                   <h3 className="font-semibold text-sm text-slate-200 flex items-center gap-2">
                     <History size={16} className="text-indigo-400" />
-                    Generated Commercial Voiceovers
+                    Generated Commercials & Dialogues
                     {generatedList.length > 0 && (
                       <span className="px-2 py-0.2 rounded-full bg-slate-800 text-xs text-slate-400 font-mono">
                         {generatedList.length}
@@ -629,7 +908,7 @@ const App: React.FC = () => {
                     </div>
                     <p className="text-xs text-slate-400">No voiceovers generated yet.</p>
                     <p className="text-[11px] text-slate-500 mt-1">
-                      Choose a voice (Ayesha for soft beauty, Maryam for warm Chai, Hamza for sale promo), then tap Generate!
+                      Choose Single Voice or Dual Dialogue mode, write your script, then tap Generate!
                     </p>
                   </div>
                 ) : (
@@ -752,10 +1031,10 @@ const App: React.FC = () => {
               <div>
                 <h3 className="font-bold text-white text-base flex items-center gap-2">
                   <FileText size={18} className="text-amber-400" />
-                  Pakistani Commercial Ad Scripts
+                  Pakistani Commercial Scripts & Dialogues
                 </h3>
                 <p className="text-xs text-slate-400">
-                  Select a pre-written high-converting Pakistani TV/Radio ad script to test instantly.
+                  Select a pre-written high-converting script (Single Voice or Male+Female Dual Dialogue).
                 </p>
               </div>
               <button
@@ -777,15 +1056,17 @@ const App: React.FC = () => {
                     <span className="font-bold text-sm text-white group-hover:text-amber-300 transition-colors">
                       {tpl.title}
                     </span>
-                    <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-300 border border-amber-500/20">
-                      {tpl.brandType}
+                    <span className={`text-[10px] px-2 py-0.5 rounded-full font-medium ${
+                      tpl.isDialogue ? 'bg-purple-500/20 text-purple-300 border border-purple-500/30' : 'bg-amber-500/10 text-amber-300 border border-amber-500/20'
+                    }`}>
+                      {tpl.isDialogue ? '🎭 Dual Dialogue' : tpl.brandType}
                     </span>
                   </div>
-                  <p className="text-xs text-slate-300 italic line-clamp-2 leading-relaxed">
+                  <p className="text-xs text-slate-300 italic line-clamp-3 leading-relaxed whitespace-pre-line">
                     "{tpl.script}"
                   </p>
                   <div className="flex items-center justify-between mt-2 text-[10px] text-slate-500">
-                    <span>Suggested Voice: {VOICE_CATALOG.find(v => v.id === tpl.suggestedVoice)?.name}</span>
+                    <span>{tpl.isDialogue ? 'Male + Female Cast' : `Voice: ${VOICE_CATALOG.find(v => v.id === tpl.suggestedVoice)?.name}`}</span>
                     <span className="text-indigo-400 font-semibold group-hover:underline">Use this Script →</span>
                   </div>
                 </div>

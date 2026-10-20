@@ -27,7 +27,7 @@ export enum VoiceName {
   Custom_Cloned = 'Custom_Cloned',
 }
 
-export type VoiceGender = 'Male' | 'Female' | 'Cloned';
+export type VoiceGender = 'Male' | 'Female' | 'Cloned' | 'Dual_Dialogue';
 export type VoiceCategory = 'pakistani_ad' | 'standard' | 'cloned';
 
 export interface VoiceOption {
@@ -82,11 +82,46 @@ export interface CustomClonedVoice {
   sampleFileName?: string;
   estimatedPitchHz?: number;
   pitchCategory?: 'Deep Baritone' | 'Natural Mid' | 'High Pitch';
+  vocalTexture?: string;
   timbreDescription?: string;
   accent: string;
-  cadence: 'Punchy Commercial' | 'Smooth Corporate' | 'Lively RJ' | 'Warm Emotional';
+  cadence: string;
+  exactDeliveryStyle: string;
   baseVoice: 'Puck' | 'Charon' | 'Fenrir' | 'Kore' | 'Zephyr';
   createdAt: number;
+}
+
+export interface DialogueLine {
+  speaker: 'male' | 'female';
+  characterName: string;
+  text: string;
+}
+
+export interface DualCharacterAnalysisResult {
+  hasDualSpeakers: boolean;
+  summary?: string;
+  maleSpeakerProfile: {
+    name: string;
+    estimatedPitchHz: number;
+    pitchCategory: 'Deep Baritone' | 'Natural Mid' | 'High Pitch';
+    vocalTexture: string;
+    accent: string;
+    cadence: string;
+    exactDeliveryStyle: string;
+    baseVoice: 'Puck' | 'Charon' | 'Fenrir';
+  };
+  femaleSpeakerProfile: {
+    name: string;
+    estimatedPitchHz: number;
+    pitchCategory: 'Deep Baritone' | 'Natural Mid' | 'High Pitch';
+    vocalTexture: string;
+    accent: string;
+    cadence: string;
+    exactDeliveryStyle: string;
+    baseVoice: 'Kore' | 'Zephyr';
+  };
+  transcribedDialogue: DialogueLine[];
+  formattedDialogueScript: string;
 }
 
 export interface AdTemplate {
@@ -96,6 +131,8 @@ export interface AdTemplate {
   brandType: string;
   language: Language;
   suggestedVoice: VoiceName;
+  suggestedFemaleVoice?: VoiceName;
+  isDialogue?: boolean;
   suggestedStyle: SpeechStyle;
   suggestedSpeed: number;
   script: string;
@@ -116,5 +153,8 @@ export interface GeneratedAudio {
   energyLevel: CommercialEnergy;
   isClonedVoice?: boolean;
   clonedVoiceName?: string;
+  isDialogue?: boolean;
+  maleVoiceName?: string;
+  femaleVoiceName?: string;
   bgmTrack?: string;
 }
