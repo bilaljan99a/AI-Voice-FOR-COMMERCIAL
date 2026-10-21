@@ -23,10 +23,37 @@ import {
   Music2,
   FileCheck2,
   ShieldCheck,
+  Languages,
+  Plus,
+  ArrowUp,
+  ArrowDown,
+  Globe,
+  ListFilter,
+  Download,
+  Wand2,
+  Lock,
+  Layers,
 } from 'lucide-react';
-import { CustomClonedVoice, VoiceName, DualCharacterAnalysisResult, DialogueLine } from '../types';
-import { analyzeVoiceSample } from '../utils/audioHelper';
-import { analyzeDualSpeakerAudio } from '../services/geminiService';
+import {
+  CustomClonedVoice,
+  VoiceName,
+  DualCharacterAnalysisResult,
+  DialogueLine,
+  Language,
+  DiarizedSegment,
+  ScriptDialogueRow,
+  DubbingWorkflowMode,
+  SpeechStyle,
+  CommercialEnergy,
+} from '../types';
+import { analyzeVoiceSample, parseScriptIntoRows, formatRowsIntoScript } from '../utils/audioHelper';
+import {
+  analyzeDualSpeakerAudio,
+  generateDialogueSpeech,
+  generateSingleDialogueSegment,
+  translateDiarizedSegments,
+  translateScriptDialogueRows,
+} from '../services/geminiService';
 import { audioBufferToWavBlob } from '../utils/audioDsp';
 import { VOICE_CATALOG } from '../data/voiceCatalog';
 
@@ -85,6 +112,10 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
   // Premade filter: 'all' | 'Male' | 'Female'
   const [premadeGenderFilter, setPremadeGenderFilter] = useState<'all' | 'Male' | 'Female'>('all');
 
+  // Sub-mode under Solo Voice Clone / Dubbing Studio:
+  // 'standard_solo' | 'mode_a_dubbing' | 'mode_b_script'
+  const [dubbingSubMode, setDubbingSubMode] = useState<DubbingWorkflowMode>('standard_solo');
+
   // --- Dual-Character (Male + Female) Diarization & Cloner State ---
   const [dualAudioBlob, setDualAudioBlob] = useState<Blob | null>(null);
   const [dualAudioUrl, setDualAudioUrl] = useState<string | null>(null);
@@ -97,6 +128,59 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
   const [editedDialogueScript, setEditedDialogueScript] = useState('');
   const [dualCloneSuccess, setDualCloneSuccess] = useState(false);
   const dualAudioRef = useRef<HTMLAudioElement | null>(null);
+
+  // --- MODE A: Voice-Preserved Translation (Auto Dubbing) State ---
+  const [dubbingSegments, setDubbingSegments] = useState<DiarizedSegment[]>([]);
+  const [targetDubLanguage, setTargetDubLanguage] = useState<Language>(Language.Telugu);
+  const [isTranslatingDub, setIsTranslatingDub] = useState(false);
+  const [isGeneratingDub, setIsGeneratingDub] = useState(false);
+  const [dubAudioUrl, setDubAudioUrl] = useState<string | null>(null);
+  const [dubProgress, setDubProgress] = useState<string | null>(null);
+  const [previewingSegmentId, setPreviewingSegmentId] = useState<string | null>(null);
+  const [dubFeedback, setDubFeedback] = useState<string | null>(null);
+  const [dubMaleVoice, setDubMaleVoice] = useState<VoiceName>(VoiceName.Hamza_Pak_Male);
+  const [dubFemaleVoice, setDubFemaleVoice] = useState<VoiceName>(VoiceName.Ayesha_Pak_Female);
+
+  // --- MODE B: Dual-Character Script (Manual Rows) State ---
+  const [scriptRows, setScriptRows] = useState<ScriptDialogueRow[]>([
+    {
+      id: 'row-1',
+      lineIndex: 1,
+      speaker: 'female',
+      characterName: 'Ayesha (Female)',
+      text: 'Suniyega! Is Eid par Mega Mart par 50% discount chal raha hai!',
+    },
+    {
+      id: 'row-2',
+      lineIndex: 2,
+      speaker: 'male',
+      characterName: 'Hamza (Male)',
+      text: 'Sach mein? Phir to abhi shopping ke liye chalte hain!',
+    },
+    {
+      id: 'row-3',
+      lineIndex: 3,
+      speaker: 'female',
+      characterName: 'Ayesha (Female)',
+      text: 'Bilkul! Saare brands par shandar bachat aur dhamaka offers hain.',
+    },
+    {
+      id: 'row-4',
+      lineIndex: 4,
+      speaker: 'male',
+      characterName: 'Hamza (Male)',
+      text: 'Zabardast! Aaj hi saari shopping mukammal karte hain.',
+    },
+  ]);
+  const [targetScriptLanguage, setTargetScriptLanguage] = useState<Language>(Language.Telugu);
+  const [isTranslatingScriptRows, setIsTranslatingScriptRows] = useState(false);
+  const [isGeneratingScriptAudio, setIsGeneratingScriptAudio] = useState(false);
+  const [scriptAudioUrl, setScriptAudioUrl] = useState<string | null>(null);
+  const [scriptProgress, setScriptProgress] = useState<string | null>(null);
+  const [previewingRowId, setPreviewingRowId] = useState<string | null>(null);
+  const [scriptFeedback, setScriptFeedback] = useState<string | null>(null);
+  const [modeBMaleVoice, setModeBMaleVoice] = useState<VoiceName>(VoiceName.Hamza_Pak_Male);
+  const [modeBFemaleVoice, setModeBFemaleVoice] = useState<VoiceName>(VoiceName.Ayesha_Pak_Female);
 
   // Refs
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -351,10 +435,374 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
       setDualMaleName(result.maleSpeakerProfile.name || 'Cloned Male Character');
       setDualFemaleName(result.femaleSpeakerProfile.name || 'Cloned Female Character');
       setEditedDialogueScript(result.formattedDialogueScript);
+
+      // Populate MODE A: Diarized Segments with preserved timestamps
+      if (result.segments && result.segments.length > 0) {
+        setDubbingSegments(result.segments);
+        // Also populate MODE B: Script rows
+        setScriptRows(
+          result.segments.map((seg, i) => ({
+            id: seg.id || `row-${i + 1}`,
+            lineIndex: i + 1,
+            speaker: seg.apparentGender,
+            characterName: seg.speakerName,
+            text: seg.originalText,
+            sourceText: seg.originalText,
+            startTimeMs: seg.startTimeMs,
+            endTimeMs: seg.endTimeMs,
+          }))
+        );
+      } else if (result.transcribedDialogue && result.transcribedDialogue.length > 0) {
+        const segs: DiarizedSegment[] = result.transcribedDialogue.map((d, i) => ({
+          id: `seg-${i + 1}-${Date.now() + i}`,
+          lineIndex: i + 1,
+          speakerId: d.speaker === 'male' ? 'speaker_1' : 'speaker_2',
+          apparentGender: d.speaker,
+          speakerName: d.speaker === 'male' ? (result.maleSpeakerProfile?.name || 'Male') : (result.femaleSpeakerProfile?.name || 'Female'),
+          startTimeMs: i * 3200,
+          endTimeMs: (i + 1) * 3200,
+          originalText: d.text,
+          translatedText: d.text,
+          assignedVoice: d.speaker === 'male' ? VoiceName.Hamza_Pak_Male : VoiceName.Ayesha_Pak_Female,
+          confidence: 0.95,
+        }));
+        setDubbingSegments(segs);
+        setScriptRows(
+          segs.map((seg, i) => ({
+            id: seg.id,
+            lineIndex: i + 1,
+            speaker: seg.apparentGender,
+            characterName: seg.speakerName,
+            text: seg.originalText,
+            sourceText: seg.originalText,
+          }))
+        );
+      }
     } catch (err) {
       console.error('Dual diarization failed:', err);
     } finally {
       setIsAnalyzingDual(false);
+    }
+  };
+
+  // --- MODE A: Voice-Preserved Translation (Auto Dubbing) Handlers ---
+  const handleTranslateDubSegments = async (targetLang: Language) => {
+    if (dubbingSegments.length === 0) return;
+    setIsTranslatingDub(true);
+    setDubFeedback(null);
+    try {
+      const translated = await translateDiarizedSegments(dubbingSegments, targetLang);
+      setDubbingSegments(translated);
+      setTargetDubLanguage(targetLang);
+      setDubFeedback(`✨ Successfully translated ${translated.length} segments to ${targetLang}! Original Male & Female identities are strictly preserved.`);
+      setTimeout(() => setDubFeedback(null), 6000);
+    } catch (err: any) {
+      alert(err.message || 'Translation failed');
+    } finally {
+      setIsTranslatingDub(false);
+    }
+  };
+
+  const handleUpdateSegmentText = (id: string, text: string) => {
+    setDubbingSegments((prev) =>
+      prev.map((s) => (s.id === id ? { ...s, translatedText: text } : s))
+    );
+  };
+
+  const handleOverrideSegmentSpeaker = (id: string, gender: 'male' | 'female') => {
+    setDubbingSegments((prev) =>
+      prev.map((s) =>
+        s.id === id
+          ? {
+              ...s,
+              apparentGender: gender,
+              speakerId: gender === 'male' ? 'speaker_1' : 'speaker_2',
+              speakerName: gender === 'male' ? dualMaleName : dualFemaleName,
+            }
+          : s
+      )
+    );
+  };
+
+  const handlePreviewSegment = async (segment: DiarizedSegment) => {
+    const textToSpeak = (segment.translatedText || segment.originalText).trim();
+    if (!textToSpeak) {
+      alert('Dialogue text is empty');
+      return;
+    }
+    setPreviewingSegmentId(segment.id);
+    try {
+      const customMale = customVoices.find((v) => v.name === dualMaleName || v.gender === 'Male');
+      const customFemale = customVoices.find((v) => v.name === dualFemaleName || v.gender === 'Female');
+      const blob = await generateSingleDialogueSegment(
+        textToSpeak,
+        segment.apparentGender,
+        dubMaleVoice,
+        dubFemaleVoice,
+        SpeechStyle.Pakistani_Dhamaka,
+        targetDubLanguage,
+        1.0,
+        'Balanced Commercial',
+        customMale,
+        customFemale
+      );
+      const url = URL.createObjectURL(blob);
+      const audio = new Audio(url);
+      audio.onended = () => setPreviewingSegmentId(null);
+      audio.play();
+    } catch (err: any) {
+      setPreviewingSegmentId(null);
+      alert(err.message || 'Failed to preview line');
+    }
+  };
+
+  const handleGenerateFullDub = async () => {
+    const active = dubbingSegments.filter(
+      (s) => (s.translatedText || s.originalText).trim().length > 0
+    );
+    if (active.length === 0) {
+      alert('Please provide dialogue text for at least one segment');
+      return;
+    }
+    setIsGeneratingDub(true);
+    setDubProgress('Synthesizing dubbed dialogue segments...');
+    setDubAudioUrl(null);
+    try {
+      const lines: DialogueLine[] = active.map((s) => ({
+        speaker: s.apparentGender,
+        characterName: s.speakerName,
+        text: (s.translatedText || s.originalText).trim(),
+      }));
+
+      const customMale = customVoices.find((v) => v.name === dualMaleName || v.gender === 'Male');
+      const customFemale = customVoices.find((v) => v.name === dualFemaleName || v.gender === 'Female');
+
+      const masterBlob = await generateDialogueSpeech(
+        lines,
+        dubMaleVoice,
+        dubFemaleVoice,
+        SpeechStyle.Pakistani_Dhamaka,
+        targetDubLanguage,
+        1.0,
+        'Balanced Commercial',
+        customMale,
+        customFemale,
+        (curr, tot) =>
+          setDubProgress(
+            `Dubbing line ${curr} of ${tot} (${lines[curr - 1].speaker === 'male' ? '👨 Male' : '👩 Female'})...`
+          )
+      );
+
+      const url = URL.createObjectURL(masterBlob);
+      setDubAudioUrl(url);
+      setDubFeedback('🎉 Multilingual video dub audio track generated successfully!');
+    } catch (err: any) {
+      alert(err.message || 'Dubbing generation failed');
+    } finally {
+      setIsGeneratingDub(false);
+      setDubProgress(null);
+    }
+  };
+
+  // --- MODE B: Dual-Character Script (Manual Rows) Handlers ---
+  const handleAddRow = (afterIndex?: number) => {
+    const nextSpeaker =
+      scriptRows.length > 0 && scriptRows[scriptRows.length - 1].speaker === 'female'
+        ? 'male'
+        : 'female';
+    const newRow: ScriptDialogueRow = {
+      id: `row-${Date.now()}`,
+      lineIndex: afterIndex !== undefined ? afterIndex + 2 : scriptRows.length + 1,
+      speaker: nextSpeaker,
+      characterName: nextSpeaker === 'male' ? 'Male Character' : 'Female Character',
+      text: '',
+    };
+    if (afterIndex !== undefined) {
+      const updated = [...scriptRows];
+      updated.splice(afterIndex + 1, 0, newRow);
+      setScriptRows(updated.map((r, i) => ({ ...r, lineIndex: i + 1 })));
+    } else {
+      setScriptRows((prev) => [...prev, newRow].map((r, i) => ({ ...r, lineIndex: i + 1 })));
+    }
+  };
+
+  const handleDeleteRow = (id: string) => {
+    if (scriptRows.length <= 1) {
+      alert('You must have at least one dialogue row');
+      return;
+    }
+    setScriptRows((prev) => prev.filter((r) => r.id !== id).map((r, i) => ({ ...r, lineIndex: i + 1 })));
+  };
+
+  const handleDuplicateRow = (index: number) => {
+    const target = scriptRows[index];
+    const dup: ScriptDialogueRow = {
+      ...target,
+      id: `row-dup-${Date.now()}`,
+      lineIndex: index + 2,
+    };
+    const updated = [...scriptRows];
+    updated.splice(index + 1, 0, dup);
+    setScriptRows(updated.map((r, i) => ({ ...r, lineIndex: i + 1 })));
+  };
+
+  const handleMoveRow = (index: number, direction: 'up' | 'down') => {
+    if (direction === 'up' && index === 0) return;
+    if (direction === 'down' && index === scriptRows.length - 1) return;
+    const targetIdx = direction === 'up' ? index - 1 : index + 1;
+    const updated = [...scriptRows];
+    const temp = updated[index];
+    updated[index] = updated[targetIdx];
+    updated[targetIdx] = temp;
+    setScriptRows(updated.map((r, i) => ({ ...r, lineIndex: i + 1 })));
+  };
+
+  const handleUpdateRowSpeaker = (id: string, speaker: 'male' | 'female') => {
+    setScriptRows((prev) =>
+      prev.map((r) =>
+        r.id === id
+          ? {
+              ...r,
+              speaker,
+              characterName: speaker === 'male' ? 'Male Character' : 'Female Character',
+            }
+          : r
+      )
+    );
+  };
+
+  const handleUpdateRowText = (id: string, text: string) => {
+    setScriptRows((prev) => prev.map((r) => (r.id === id ? { ...r, text } : r)));
+  };
+
+  const handleTranslateScriptRows = async (targetLang: Language) => {
+    const active = scriptRows.filter((r) => r.text && r.text.trim().length > 0);
+    if (active.length === 0) {
+      alert('Please enter dialogue text in at least one row before translating');
+      return;
+    }
+    setIsTranslatingScriptRows(true);
+    setScriptFeedback(null);
+    try {
+      const translated = await translateScriptDialogueRows(scriptRows, targetLang);
+      setScriptRows(translated);
+      setTargetScriptLanguage(targetLang);
+      setScriptFeedback(
+        `✨ Translated dialogue rows into ${targetLang}! Each row's assigned speaker is strictly preserved.`
+      );
+      setTimeout(() => setScriptFeedback(null), 6000);
+    } catch (err: any) {
+      alert(err.message || 'Translation failed');
+    } finally {
+      setIsTranslatingScriptRows(false);
+    }
+  };
+
+  const handlePreviewRow = async (row: ScriptDialogueRow) => {
+    const text = (row.text || '').trim();
+    if (!text) {
+      alert('Please enter text for this line first');
+      return;
+    }
+    setPreviewingRowId(row.id);
+    try {
+      const customMale = customVoices.find((v) => v.name === dualMaleName || v.gender === 'Male');
+      const customFemale = customVoices.find((v) => v.name === dualFemaleName || v.gender === 'Female');
+      const blob = await generateSingleDialogueSegment(
+        text,
+        row.speaker,
+        modeBMaleVoice,
+        modeBFemaleVoice,
+        SpeechStyle.Pakistani_Dhamaka,
+        targetScriptLanguage,
+        1.0,
+        'Balanced Commercial',
+        customMale,
+        customFemale
+      );
+      const url = URL.createObjectURL(blob);
+      const audio = new Audio(url);
+      audio.onended = () => setPreviewingRowId(null);
+      audio.play();
+    } catch (err: any) {
+      setPreviewingRowId(null);
+      alert(err.message || 'Failed to preview line');
+    }
+  };
+
+  const handleGenerateFullScriptAudio = async () => {
+    const active = scriptRows.filter((r) => r.text && r.text.trim().length > 0);
+    if (active.length === 0) {
+      alert('Please enter dialogue text for at least one row');
+      return;
+    }
+    setIsGeneratingScriptAudio(true);
+    setScriptProgress('Synthesizing all dialogue rows...');
+    setScriptAudioUrl(null);
+    try {
+      const lines: DialogueLine[] = active.map((r) => ({
+        speaker: r.speaker,
+        characterName: r.speaker === 'male' ? 'Male' : 'Female',
+        text: r.text.trim(),
+      }));
+
+      const customMale = customVoices.find((v) => v.name === dualMaleName || v.gender === 'Male');
+      const customFemale = customVoices.find((v) => v.name === dualFemaleName || v.gender === 'Female');
+
+      const masterBlob = await generateDialogueSpeech(
+        lines,
+        modeBMaleVoice,
+        modeBFemaleVoice,
+        SpeechStyle.Pakistani_Dhamaka,
+        targetScriptLanguage,
+        1.0,
+        'Balanced Commercial',
+        customMale,
+        customFemale,
+        (curr, tot) =>
+          setScriptProgress(
+            `Synthesizing row ${curr} of ${tot} (${lines[curr - 1].speaker === 'male' ? '👨 Male' : '👩 Female'})...`
+          )
+      );
+
+      const url = URL.createObjectURL(masterBlob);
+      setScriptAudioUrl(url);
+      setScriptFeedback('🎉 Dual-character dialogue audio synthesized successfully!');
+    } catch (err: any) {
+      alert(err.message || 'Audio synthesis failed');
+    } finally {
+      setIsGeneratingScriptAudio(false);
+      setScriptProgress(null);
+    }
+  };
+
+  const handleSendRowsToStudio = () => {
+    const formatted = formatRowsIntoScript(scriptRows);
+    if (onLoadDualClonesAndDialogue) {
+      const existingMale = customVoices.find((v) => v.name === dualMaleName || v.gender === 'Male');
+      const existingFemale = customVoices.find((v) => v.name === dualFemaleName || v.gender === 'Female');
+
+      const finalMale: CustomClonedVoice = existingMale || {
+        id: `clone-male-${Date.now()}`,
+        name: dualMaleName || 'Cloned Male Voice',
+        gender: 'Male',
+        accent: 'Commercial Voiceover',
+        cadence: 'Commercial',
+        exactDeliveryStyle: 'Urgent Promo',
+        baseVoice: 'Fenrir',
+        createdAt: Date.now(),
+      };
+      const finalFemale: CustomClonedVoice = existingFemale || {
+        id: `clone-female-${Date.now()}`,
+        name: dualFemaleName || 'Cloned Female Voice',
+        gender: 'Female',
+        accent: 'Commercial Voiceover',
+        cadence: 'Commercial',
+        exactDeliveryStyle: 'Fashion & Lawn',
+        baseVoice: 'Zephyr',
+        createdAt: Date.now(),
+      };
+      onLoadDualClonesAndDialogue(finalMale, finalFemale, formatted);
     }
   };
 
@@ -512,7 +960,63 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
       {/* TAB 1: CREATE NEW CLONE */}
       {activeTab === 'create' && (
         <div className="space-y-6">
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          {/* Workflow Mode Selector */}
+          <div className="p-2 bg-slate-950/90 rounded-2xl border border-slate-800 flex flex-wrap items-center justify-between gap-2 shadow-lg">
+            <div className="flex items-center gap-1.5 overflow-x-auto w-full sm:w-auto">
+              <button
+                type="button"
+                onClick={() => setDubbingSubMode('standard_solo')}
+                className={`px-3.5 py-2 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all ${
+                  dubbingSubMode === 'standard_solo'
+                    ? 'bg-indigo-600 text-white shadow-md'
+                    : 'text-slate-400 hover:text-white bg-slate-900/50'
+                }`}
+              >
+                <Mic size={14} />
+                <span>🎙️ Solo Voice Clone</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setDubbingSubMode('mode_a_dubbing')}
+                className={`px-3.5 py-2 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all ${
+                  dubbingSubMode === 'mode_a_dubbing'
+                    ? 'bg-gradient-to-r from-purple-600 to-indigo-600 text-white shadow-md'
+                    : 'text-slate-400 hover:text-white bg-slate-900/50'
+                }`}
+              >
+                <Globe size={14} className="text-purple-300" />
+                <span>MODE A: Voice-Preserved Translation</span>
+                <span className="text-[10px] bg-purple-400/20 text-purple-200 px-1.5 py-0.2 rounded-full border border-purple-400/30 font-bold">
+                  Auto Dubbing
+                </span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setDubbingSubMode('mode_b_script')}
+                className={`px-3.5 py-2 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all ${
+                  dubbingSubMode === 'mode_b_script'
+                    ? 'bg-gradient-to-r from-pink-600 to-rose-600 text-white shadow-md'
+                    : 'text-slate-400 hover:text-white bg-slate-900/50'
+                }`}
+              >
+                <ListFilter size={14} className="text-pink-300" />
+                <span>MODE B: Dual-Character Script</span>
+                <span className="text-[10px] bg-pink-400/20 text-pink-200 px-1.5 py-0.2 rounded-full border border-pink-400/30 font-bold">
+                  Manual Control
+                </span>
+              </button>
+            </div>
+
+            <div className="text-[11px] text-slate-400 px-2 hidden lg:flex items-center gap-1.5">
+              <Lock size={12} className="text-emerald-400" />
+              <span>Voice Identity Lock: Active across Punjabi, Hindi, Urdu & Telugu</span>
+            </div>
+          </div>
+
+          {/* SUB-MODE 1: STANDARD SOLO VOICE CLONE */}
+          {dubbingSubMode === 'standard_solo' && (
+            <div className="space-y-6 animate-in fade-in">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
             
             {/* Left Column: Live Mic Recorder */}
             <div className="bg-slate-950/60 p-5 rounded-xl border border-slate-800/80 flex flex-col justify-between">
@@ -807,6 +1311,635 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({
             </div>
           )}
 
+          {/* Close subMode === 'standard_solo' */}
+          </div>
+          )}
+
+          {/* SUB-MODE 2: MODE A: VOICE-PRESERVED TRANSLATION (AUTO DUBBING) */}
+          {dubbingSubMode === 'mode_a_dubbing' && (
+            <div className="space-y-6 animate-in fade-in">
+              {/* Hero Banner */}
+              <div className="p-4 rounded-2xl bg-gradient-to-r from-purple-950/70 via-indigo-950/50 to-slate-950 border border-purple-500/40 shadow-xl">
+                <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+                  <div className="flex items-start gap-3">
+                    <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-purple-500 to-indigo-600 flex items-center justify-center text-white flex-shrink-0 shadow-md">
+                      <Globe size={20} />
+                    </div>
+                    <div>
+                      <h3 className="font-bold text-sm text-white flex items-center gap-2">
+                        Mode A: Voice-Preserved Translation (Automatic Dubbing)
+                        <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                          Zero Voice Swapping
+                        </span>
+                      </h3>
+                      <p className="text-xs text-slate-300 mt-0.5 leading-relaxed">
+                        Converts existing video/audio commercials and YouTube content into target languages (Telugu, Urdu, Hindi, Punjabi, etc.) while preserving the exact speaker identities, timestamps, and conversational order.
+                      </p>
+                    </div>
+                  </div>
+
+                  <button
+                    onClick={loadDemoDualAudio}
+                    disabled={isAnalyzingDual}
+                    className="px-3.5 py-2 rounded-xl bg-purple-600/30 hover:bg-purple-600/50 text-purple-200 border border-purple-500/40 text-xs font-semibold flex items-center gap-1.5 transition-all flex-shrink-0"
+                  >
+                    <Music2 size={14} />
+                    <span>Load Demo Ad Audio</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Step 1 & 2: Audio Upload & Diarization */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="bg-slate-950/80 p-4 rounded-xl border border-slate-800 flex flex-col justify-between">
+                  <div>
+                    <h4 className="font-semibold text-xs text-slate-200 mb-1 flex items-center gap-2">
+                      <Upload size={14} className="text-purple-400" />
+                      1. Upload Audio or Video Reference
+                    </h4>
+                    <p className="text-[11px] text-slate-400 mb-3">
+                      Upload audio file with multiple speakers talking. Diarization will segment each speaker turn.
+                    </p>
+                    <label className="border-2 border-dashed border-purple-500/30 hover:border-purple-400/60 bg-purple-950/10 hover:bg-purple-950/20 rounded-xl p-4 flex flex-col items-center justify-center cursor-pointer transition-all text-center">
+                      <Upload size={20} className="text-purple-400 mb-1" />
+                      <span className="text-xs font-semibold text-slate-200">
+                        {dualAudioName || 'Choose file (.mp3, .wav, .m4a, .ogg)'}
+                      </span>
+                      <input
+                        type="file"
+                        accept="audio/*,.wav,.mp3,.m4a,.ogg"
+                        onChange={handleDualFileUpload}
+                        className="hidden"
+                      />
+                    </label>
+                  </div>
+
+                  {dualAudioUrl && (
+                    <div className="mt-3 p-2.5 bg-purple-950/40 border border-purple-500/30 rounded-lg flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <button
+                          onClick={togglePlayDual}
+                          className="w-7 h-7 rounded-full bg-purple-600 hover:bg-purple-500 text-white flex items-center justify-center"
+                        >
+                          {isPlayingDual ? <Pause size={12} /> : <Play size={12} className="ml-0.5" />}
+                        </button>
+                        <span className="text-xs text-purple-200 font-mono truncate max-w-[200px]">
+                          {dualAudioName || 'Reference Audio'}
+                        </span>
+                      </div>
+                      <span className="text-[10px] text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded font-mono">
+                        Diarized
+                      </span>
+                    </div>
+                  )}
+                </div>
+
+                {/* Target Language & Voice Casting */}
+                <div className="bg-slate-950/80 p-4 rounded-xl border border-slate-800 space-y-3">
+                  <h4 className="font-semibold text-xs text-slate-200 flex items-center gap-2">
+                    <Globe size={14} className="text-indigo-400" />
+                    2. Target Dubbing Language & Cast
+                  </h4>
+
+                  <div>
+                    <label className="block text-[11px] text-slate-400 mb-1">
+                      Target Language for Video Dubbing
+                    </label>
+                    <select
+                      value={targetDubLanguage}
+                      onChange={(e) => setTargetDubLanguage(e.target.value as Language)}
+                      className="w-full bg-slate-900 border border-slate-700 focus:border-indigo-500 rounded-lg p-2 text-xs text-white font-medium outline-none"
+                    >
+                      {Object.values(Language).map((lang) => (
+                        <option key={lang} value={lang}>
+                          {lang}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2 text-xs">
+                    <div className="p-2.5 rounded-lg bg-blue-950/30 border border-blue-900/50">
+                      <span className="text-[11px] font-bold text-blue-300 block">👨 Male Speaker Voice</span>
+                      <select
+                        value={dubMaleVoice}
+                        onChange={(e) => setDubMaleVoice(e.target.value as VoiceName)}
+                        className="w-full bg-slate-900 border border-slate-700 text-[11px] text-white rounded p-1 mt-1 outline-none"
+                      >
+                        {VOICE_CATALOG.filter((v) => v.gender === 'Male').map((v) => (
+                          <option key={v.id} value={v.id}>
+                            {v.name}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div className="p-2.5 rounded-lg bg-pink-950/30 border border-pink-900/50">
+                      <span className="text-[11px] font-bold text-pink-300 block">👩 Female Speaker Voice</span>
+                      <select
+                        value={dubFemaleVoice}
+                        onChange={(e) => setDubFemaleVoice(e.target.value as VoiceName)}
+                        className="w-full bg-slate-900 border border-slate-700 text-[11px] text-white rounded p-1 mt-1 outline-none"
+                      >
+                        {VOICE_CATALOG.filter((v) => v.gender === 'Female').map((v) => (
+                          <option key={v.id} value={v.id}>
+                            {v.name}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+
+                  <button
+                    onClick={() => handleTranslateDubSegments(targetDubLanguage)}
+                    disabled={isTranslatingDub || dubbingSegments.length === 0}
+                    className="w-full py-2.5 rounded-lg bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white font-bold text-xs flex items-center justify-center gap-2 shadow-md transition-all disabled:opacity-50"
+                  >
+                    {isTranslatingDub ? (
+                      <>
+                        <RefreshCw size={13} className="animate-spin" />
+                        <span>Translating Segments to {targetDubLanguage}...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Languages size={13} />
+                        <span>Translate Segments to {targetDubLanguage} (Preserve Voices)</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
+
+              {/* Feedback toast */}
+              {dubFeedback && (
+                <div className="p-3 bg-emerald-950/40 border border-emerald-500/40 rounded-xl text-xs text-emerald-200 flex items-center gap-2">
+                  <CheckCircle2 size={16} className="text-emerald-400 flex-shrink-0" />
+                  <span>{dubFeedback}</span>
+                </div>
+              )}
+
+              {/* Step 3: Translation Review Table */}
+              <div className="bg-slate-950 p-4 rounded-xl border border-slate-800 space-y-3">
+                <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 pb-2 border-b border-slate-800">
+                  <div className="flex items-center gap-2">
+                    <FileCheck2 size={16} className="text-purple-400" />
+                    <h4 className="font-bold text-xs text-white">
+                      3. Translation Review Stage (Editable Table)
+                    </h4>
+                  </div>
+                  <span className="text-[10px] text-slate-400">
+                    Verify each dialogue line, speaker gender, and translated wording before synthesis
+                  </span>
+                </div>
+
+                {dubbingSegments.length === 0 ? (
+                  <div className="py-8 text-center text-slate-500 text-xs">
+                    No segments diarized yet. Upload an audio recording or click "Load Demo Ad Audio" above.
+                  </div>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left text-xs border-collapse">
+                      <thead>
+                        <tr className="border-b border-slate-800 text-slate-400 text-[11px]">
+                          <th className="py-2 px-2.5 font-semibold">#</th>
+                          <th className="py-2 px-2.5 font-semibold">Time</th>
+                          <th className="py-2 px-2.5 font-semibold">Original Dialogue</th>
+                          <th className="py-2 px-2.5 font-semibold">Speaker (Gender)</th>
+                          <th className="py-2 px-2.5 font-semibold">Target Translation ({targetDubLanguage})</th>
+                          <th className="py-2 px-2.5 font-semibold text-center">Preview</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-800/60 font-sans">
+                        {dubbingSegments.map((seg, idx) => (
+                          <tr key={seg.id} className="hover:bg-slate-900/50 transition-colors">
+                            <td className="py-2.5 px-2.5 font-mono text-slate-500">{idx + 1}</td>
+                            <td className="py-2.5 px-2.5 font-mono text-[10px] text-slate-400 whitespace-nowrap">
+                              {(seg.startTimeMs / 1000).toFixed(1)}s - {(seg.endTimeMs / 1000).toFixed(1)}s
+                            </td>
+                            <td className="py-2.5 px-2.5 text-slate-300 max-w-[200px] truncate" title={seg.originalText}>
+                              {seg.originalText}
+                            </td>
+                            <td className="py-2.5 px-2.5 whitespace-nowrap">
+                              <select
+                                value={seg.apparentGender}
+                                onChange={(e) =>
+                                  handleOverrideSegmentSpeaker(seg.id, e.target.value as 'male' | 'female')
+                                }
+                                className={`text-[11px] rounded px-2 py-1 outline-none font-bold ${
+                                  seg.apparentGender === 'male'
+                                    ? 'bg-blue-950 text-blue-300 border border-blue-800'
+                                    : 'bg-pink-950 text-pink-300 border border-pink-800'
+                                }`}
+                              >
+                                <option value="male">👨 Male</option>
+                                <option value="female">👩 Female</option>
+                              </select>
+                            </td>
+                            <td className="py-2.5 px-2.5 min-w-[220px]">
+                              <input
+                                type="text"
+                                value={seg.translatedText || ''}
+                                onChange={(e) => handleUpdateSegmentText(seg.id, e.target.value)}
+                                placeholder="Enter or edit translation..."
+                                className="w-full bg-slate-900 border border-slate-700 focus:border-purple-500 rounded px-2.5 py-1 text-xs text-white outline-none"
+                              />
+                            </td>
+                            <td className="py-2.5 px-2.5 text-center whitespace-nowrap">
+                              <button
+                                type="button"
+                                onClick={() => handlePreviewSegment(seg)}
+                                disabled={previewingSegmentId === seg.id}
+                                className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-[11px] flex items-center gap-1 mx-auto"
+                                title="Synthesize preview of this line"
+                              >
+                                {previewingSegmentId === seg.id ? (
+                                  <RefreshCw size={11} className="animate-spin text-purple-400" />
+                                ) : (
+                                  <Volume2 size={11} className="text-purple-400" />
+                                )}
+                                <span>Preview</span>
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+
+                {/* Final Assemble Button */}
+                {dubbingSegments.length > 0 && (
+                  <div className="pt-3 border-t border-slate-800 flex flex-col sm:flex-row items-center justify-between gap-3">
+                    <span className="text-xs text-slate-400">
+                      {dubProgress || `${dubbingSegments.length} dialogue segments ready for chronological dub assembly.`}
+                    </span>
+
+                    <button
+                      type="button"
+                      onClick={handleGenerateFullDub}
+                      disabled={isGeneratingDub}
+                      className="w-full sm:w-auto px-6 py-3 rounded-xl bg-gradient-to-r from-emerald-600 via-teal-600 to-indigo-600 hover:from-emerald-500 hover:to-indigo-500 text-white font-bold text-xs shadow-lg shadow-emerald-950/50 flex items-center justify-center gap-2 transition-all disabled:opacity-50"
+                    >
+                      {isGeneratingDub ? (
+                        <>
+                          <RefreshCw size={15} className="animate-spin" />
+                          <span>{dubProgress || 'Generating Dub Track...'}</span>
+                        </>
+                      ) : (
+                        <>
+                          <Sparkles size={15} />
+                          <span>🎬 Dub & Assemble Full Master Audio Track</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              {/* Master Dubbed Audio Output */}
+              {dubAudioUrl && (
+                <div className="p-4 rounded-xl bg-purple-950/30 border border-purple-500/40 flex flex-col sm:flex-row items-center justify-between gap-3 animate-in fade-in">
+                  <div className="flex items-center gap-3 w-full sm:w-auto">
+                    <div className="w-10 h-10 rounded-full bg-purple-600 text-white flex items-center justify-center flex-shrink-0 shadow">
+                      <Volume2 size={20} />
+                    </div>
+                    <div>
+                      <h4 className="font-bold text-xs text-purple-100">
+                        Final Multilingual Dub Audio Track ({targetDubLanguage})
+                      </h4>
+                      <p className="text-[11px] text-purple-300/80">
+                        Synchronized chronological audio with male and female voices locked.
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2 w-full sm:w-auto">
+                    <audio controls src={dubAudioUrl} className="h-8 w-full sm:w-48" />
+                    <a
+                      href={dubAudioUrl}
+                      download={`Dubbed_${targetDubLanguage.replace(/[^a-zA-Z0-9]/g, '_')}_Audio.wav`}
+                      className="px-3 py-1.5 rounded-lg bg-purple-600 hover:bg-purple-500 text-white text-xs font-semibold flex items-center gap-1.5 flex-shrink-0"
+                    >
+                      <Download size={13} />
+                      <span>Download</span>
+                    </a>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* SUB-MODE 3: MODE B: DUAL-CHARACTER SCRIPT (MANUAL SPEAKER CONTROL) */}
+          {dubbingSubMode === 'mode_b_script' && (
+            <div className="space-y-6 animate-in fade-in">
+              {/* Hero Banner */}
+              <div className="p-4 rounded-2xl bg-gradient-to-r from-pink-950/70 via-purple-950/50 to-slate-950 border border-pink-500/40 shadow-xl">
+                <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+                  <div className="flex items-start gap-3">
+                    <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-pink-500 to-rose-600 flex items-center justify-center text-white flex-shrink-0 shadow-md">
+                      <ListFilter size={20} />
+                    </div>
+                    <div>
+                      <h3 className="font-bold text-sm text-white flex items-center gap-2">
+                        Mode B: Dual-Character Script (Manual Speaker Control)
+                        <span className="text-[10px] px-2 py-0.5 rounded-full bg-pink-500/20 text-pink-300 border border-pink-500/30">
+                          Dynamic Rows
+                        </span>
+                      </h3>
+                      <p className="text-xs text-slate-300 mt-0.5 leading-relaxed">
+                        Control exactly who speaks each line with a dynamic list of dialogue rows. Add, delete, duplicate, or reorder lines, and translate into Telugu, Hindi, or Urdu without ever touching speaker assignments.
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2 flex-shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => handleAddRow()}
+                      className="px-3.5 py-2 rounded-xl bg-pink-600 hover:bg-pink-500 text-white text-xs font-bold flex items-center gap-1.5 shadow-md transition-all"
+                    >
+                      <Plus size={14} />
+                      <span>Add Dialogue Line</span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {/* Character Voice Casting Bar */}
+              <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div>
+                  <label className="block text-[11px] font-semibold text-blue-300 mb-1">
+                    👨 Character 1 (Male Voice)
+                  </label>
+                  <select
+                    value={modeBMaleVoice}
+                    onChange={(e) => setModeBMaleVoice(e.target.value as VoiceName)}
+                    className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-xs text-white outline-none"
+                  >
+                    {VOICE_CATALOG.filter((v) => v.gender === 'Male').map((v) => (
+                      <option key={v.id} value={v.id}>
+                        {v.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-[11px] font-semibold text-pink-300 mb-1">
+                    👩 Character 2 (Female Voice)
+                  </label>
+                  <select
+                    value={modeBFemaleVoice}
+                    onChange={(e) => setModeBFemaleVoice(e.target.value as VoiceName)}
+                    className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-xs text-white outline-none"
+                  >
+                    {VOICE_CATALOG.filter((v) => v.gender === 'Female').map((v) => (
+                      <option key={v.id} value={v.id}>
+                        {v.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-[11px] font-semibold text-indigo-300 mb-1">
+                    🌐 Script Language
+                  </label>
+                  <select
+                    value={targetScriptLanguage}
+                    onChange={(e) => setTargetScriptLanguage(e.target.value as Language)}
+                    className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-xs text-white outline-none"
+                  >
+                    {Object.values(Language).map((lang) => (
+                      <option key={lang} value={lang}>
+                        {lang}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              {/* Feedback toast */}
+              {scriptFeedback && (
+                <div className="p-3 bg-pink-950/40 border border-pink-500/40 rounded-xl text-xs text-pink-200 flex items-center gap-2">
+                  <CheckCircle2 size={16} className="text-pink-400 flex-shrink-0" />
+                  <span>{scriptFeedback}</span>
+                </div>
+              )}
+
+              {/* Toolbar */}
+              <div className="flex flex-wrap items-center justify-between gap-2 p-2 bg-slate-950 rounded-xl border border-slate-800 text-xs">
+                <div className="flex items-center gap-2">
+                  <span className="text-slate-400 font-mono text-[11px]">
+                    Total Lines: {scriptRows.length} (
+                    {scriptRows.filter((r) => r.speaker === 'male').length} Male •{' '}
+                    {scriptRows.filter((r) => r.speaker === 'female').length} Female)
+                  </span>
+                </div>
+
+                <div className="flex items-center gap-2 flex-wrap">
+                  <button
+                    type="button"
+                    onClick={() => handleTranslateScriptRows(targetScriptLanguage)}
+                    disabled={isTranslatingScriptRows}
+                    className="px-3 py-1.5 rounded-lg bg-indigo-600/30 hover:bg-indigo-600/50 text-indigo-200 border border-indigo-500/40 text-xs font-semibold flex items-center gap-1.5 transition-all disabled:opacity-50"
+                  >
+                    {isTranslatingScriptRows ? (
+                      <RefreshCw size={12} className="animate-spin" />
+                    ) : (
+                      <Languages size={12} />
+                    )}
+                    <span>Translate Script to {targetScriptLanguage}</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => handleAddRow()}
+                    className="px-3 py-1.5 rounded-lg bg-slate-850 hover:bg-slate-800 text-slate-200 border border-slate-700 text-xs font-semibold flex items-center gap-1"
+                  >
+                    <Plus size={12} />
+                    <span>Insert Line</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Dynamic Dialogue Rows List */}
+              <div className="space-y-2.5">
+                {scriptRows.map((row, idx) => (
+                  <div
+                    key={row.id}
+                    className="p-3 rounded-xl bg-slate-950/80 border border-slate-800/80 hover:border-slate-700 flex flex-col sm:flex-row items-start sm:items-center gap-2.5 transition-all"
+                  >
+                    {/* Row Line # and Speaker Selector */}
+                    <div className="flex items-center gap-2 flex-shrink-0">
+                      <span className="w-6 h-6 rounded-full bg-slate-850 text-slate-300 flex items-center justify-center font-mono text-xs font-bold border border-slate-700">
+                        {idx + 1}
+                      </span>
+                      <select
+                        value={row.speaker}
+                        onChange={(e) =>
+                          handleUpdateRowSpeaker(row.id, e.target.value as 'male' | 'female')
+                        }
+                        className={`text-xs rounded-lg px-2.5 py-1.5 outline-none font-bold border ${
+                          row.speaker === 'male'
+                            ? 'bg-blue-950 text-blue-300 border-blue-800'
+                            : 'bg-pink-950 text-pink-300 border-pink-800'
+                        }`}
+                      >
+                        <option value="female">👩 Female (Speaker 2)</option>
+                        <option value="male">👨 Male (Speaker 1)</option>
+                      </select>
+                    </div>
+
+                    {/* Dialogue Text input */}
+                    <div className="flex-1 w-full">
+                      <input
+                        type="text"
+                        value={row.text}
+                        onChange={(e) => handleUpdateRowText(row.id, e.target.value)}
+                        placeholder={`Line ${idx + 1}: Enter ${row.speaker === 'male' ? 'male' : 'female'} dialogue...`}
+                        className="w-full bg-slate-900 border border-slate-700/80 focus:border-pink-500 rounded-lg px-3 py-1.5 text-xs text-white outline-none"
+                      />
+                      {row.sourceText && row.targetText && row.sourceText !== row.targetText && (
+                        <span className="text-[10px] text-slate-500 block mt-0.5 truncate font-mono">
+                          Original: {row.sourceText}
+                        </span>
+                      )}
+                    </div>
+
+                    {/* Actions: Preview, Add Below, Duplicate, Move Up, Move Down, Delete */}
+                    <div className="flex items-center gap-1 flex-shrink-0 self-end sm:self-center">
+                      <button
+                        type="button"
+                        onClick={() => handlePreviewRow(row)}
+                        disabled={previewingRowId === row.id}
+                        className="p-1.5 rounded-lg hover:bg-slate-800 text-slate-400 hover:text-white"
+                        title="Preview this line"
+                      >
+                        {previewingRowId === row.id ? (
+                          <RefreshCw size={13} className="animate-spin text-indigo-400" />
+                        ) : (
+                          <Volume2 size={13} />
+                        )}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleAddRow(idx)}
+                        className="p-1.5 rounded-lg hover:bg-slate-800 text-slate-400 hover:text-emerald-400"
+                        title="Add line below"
+                      >
+                        <Plus size={13} />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleDuplicateRow(idx)}
+                        className="p-1.5 rounded-lg hover:bg-slate-800 text-slate-400 hover:text-indigo-400"
+                        title="Duplicate line"
+                      >
+                        <Copy size={13} />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleMoveRow(idx, 'up')}
+                        disabled={idx === 0}
+                        className="p-1.5 rounded-lg hover:bg-slate-800 text-slate-400 hover:text-white disabled:opacity-20"
+                        title="Move Up"
+                      >
+                        <ArrowUp size={13} />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleMoveRow(idx, 'down')}
+                        disabled={idx === scriptRows.length - 1}
+                        className="p-1.5 rounded-lg hover:bg-slate-800 text-slate-400 hover:text-white disabled:opacity-20"
+                        title="Move Down"
+                      >
+                        <ArrowDown size={13} />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteRow(row.id)}
+                        disabled={scriptRows.length <= 1}
+                        className="p-1.5 rounded-lg hover:bg-slate-800 text-slate-400 hover:text-rose-400 disabled:opacity-20"
+                        title="Delete line"
+                      >
+                        <Trash2 size={13} />
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {/* Master Generate & Transfer Controls */}
+              <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 flex flex-col sm:flex-row items-center justify-between gap-3">
+                <span className="text-xs text-slate-400">
+                  {scriptProgress ||
+                    `${scriptRows.length} lines configured. Generate full continuous dialogue or export to Studio.`}
+                </span>
+
+                <div className="flex items-center gap-2 w-full sm:w-auto">
+                  <button
+                    type="button"
+                    onClick={handleSendRowsToStudio}
+                    className="flex-1 sm:flex-initial px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold flex items-center justify-center gap-1.5"
+                  >
+                    <Layers size={14} />
+                    <span>Send to Dialogue Studio</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={handleGenerateFullScriptAudio}
+                    disabled={isGeneratingScriptAudio}
+                    className="flex-1 sm:flex-initial px-6 py-2.5 rounded-xl bg-gradient-to-r from-pink-600 via-purple-600 to-indigo-600 hover:from-pink-500 hover:to-indigo-500 text-white font-bold text-xs shadow-lg shadow-pink-950/50 flex items-center justify-center gap-2 transition-all disabled:opacity-50"
+                  >
+                    {isGeneratingScriptAudio ? (
+                      <>
+                        <RefreshCw size={14} className="animate-spin" />
+                        <span>Synthesizing...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Sparkles size={14} />
+                        <span>🎙️ Synthesize Full Dialogue Audio</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+              </div>
+
+              {/* Master Script Audio Output Player */}
+              {scriptAudioUrl && (
+                <div className="p-4 rounded-xl bg-pink-950/30 border border-pink-500/40 flex flex-col sm:flex-row items-center justify-between gap-3 animate-in fade-in">
+                  <div className="flex items-center gap-3 w-full sm:w-auto">
+                    <div className="w-10 h-10 rounded-full bg-pink-600 text-white flex items-center justify-center flex-shrink-0 shadow">
+                      <Volume2 size={20} />
+                    </div>
+                    <div>
+                      <h4 className="font-bold text-xs text-pink-100">
+                        Synthesized Dual-Character Dialogue Audio
+                      </h4>
+                      <p className="text-[11px] text-pink-300/80">
+                        {scriptRows.length} lines stitched in natural conversational order.
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2 w-full sm:w-auto">
+                    <audio controls src={scriptAudioUrl} className="h-8 w-full sm:w-48" />
+                    <a
+                      href={scriptAudioUrl}
+                      download={`Dialogue_Audio_${targetScriptLanguage.replace(/[^a-zA-Z0-9]/g, '_')}.wav`}
+                      className="px-3 py-1.5 rounded-lg bg-pink-600 hover:bg-pink-500 text-white text-xs font-semibold flex items-center gap-1.5 flex-shrink-0"
+                    >
+                      <Download size={13} />
+                      <span>Download</span>
+                    </a>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )}
 

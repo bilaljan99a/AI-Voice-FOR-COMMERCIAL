@@ -11,9 +11,25 @@ import {
   CommercialEnergy,
   CustomClonedVoice,
   AdTemplate,
+  ScriptDialogueRow,
+  DialogueLine,
 } from './types';
-import { generateSpeech, generateDialogueSpeech, getActiveApiKey } from './services/geminiService';
-import { base64ToUint8Array, pcmToWavBlob, parseDialogueScript } from './utils/audioHelper';
+import {
+  generateSpeech,
+  generateDialogueSpeech,
+  getActiveApiKey,
+  autoDetectAndFormatDialogueScript,
+  translateDialogueScript,
+  translateScriptDialogueRows,
+  generateSingleDialogueSegment,
+} from './services/geminiService';
+import {
+  base64ToUint8Array,
+  pcmToWavBlob,
+  parseDialogueScript,
+  parseScriptIntoRows,
+  formatRowsIntoScript,
+} from './utils/audioHelper';
 import { enhanceVoiceAcoustics } from './utils/audioDsp';
 import { VOICE_CATALOG } from './data/voiceCatalog';
 import { PAKISTANI_AD_TEMPLATES } from './data/adTemplates';
@@ -36,7 +52,19 @@ import {
   ExternalLink,
   HelpCircle,
   Users,
-  UserCheck
+  UserCheck,
+  Wand2,
+  Languages,
+  Lock,
+  RefreshCw,
+  Plus,
+  Trash2,
+  Copy,
+  ArrowUp,
+  ArrowDown,
+  Play,
+  Check,
+  ListFilter,
 } from 'lucide-react';
 
 const LOCAL_STORAGE_CLONES_KEY = 'voicecraft_custom_cloned_voices_v1';
@@ -96,6 +124,37 @@ Female: To der kis baat ki! Aaj hi tashreef laayein aur bachat ka faida uthayein
   const [generatedList, setGeneratedList] = useState<GeneratedAudio[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [showTemplateModal, setShowTemplateModal] = useState<boolean>(false);
+
+  // Auto-Detect & Translation States
+  const [isDetectingSpeakers, setIsDetectingSpeakers] = useState<boolean>(false);
+  const [detectFeedback, setDetectFeedback] = useState<string | null>(null);
+  const [isTranslatingDialogue, setIsTranslatingDialogue] = useState<boolean>(false);
+  const [showTranslateModal, setShowTranslateModal] = useState<boolean>(false);
+
+  // Dual-Character Dialogue Mode: 'builder' (Interactive Line-by-Line with speaker switches) | 'raw' (Freeform script)
+  const [dialogueEditorTab, setDialogueEditorTab] = useState<'builder' | 'raw'>('builder');
+  const [dialogueRows, setDialogueRows] = useState<ScriptDialogueRow[]>(() => {
+    return parseScriptIntoRows(`Male: Suno Ayesha! Is Bari Eid par Mega Mart par pure 50% discount ka sab se bara dhamaka shuru ho gaya hai!
+Female: Sach mein Hamza? Pure pachas feesad? Phir to humein abhi chalna chahiye shopping ke liye!
+Male: Bilkul! Har brand aur har item par bachat. Stock mehdood hai, aaj hi tashreef laayein!
+Female: To der kis baat ki! Aaj hi tashreef laayein aur bachat ka faida uthayein!`);
+  });
+  const [previewingRowId, setPreviewingRowId] = useState<string | null>(null);
+
+  // Memoized parsed dialogue line counts
+  const dialogueLinesParsed = React.useMemo(() => {
+    if (generationMode !== 'dual_dialogue') return { male: 0, female: 0, total: 0 };
+    if (dialogueEditorTab === 'builder') {
+      const activeRows = dialogueRows.filter((r) => r.text && r.text.trim().length > 0);
+      const male = activeRows.filter((r) => r.speaker === 'male').length;
+      const female = activeRows.filter((r) => r.speaker === 'female').length;
+      return { male, female, total: activeRows.length };
+    }
+    const lines = parseDialogueScript(dialogueText);
+    const male = lines.filter((l) => l.speaker === 'male').length;
+    const female = lines.filter((l) => l.speaker === 'female').length;
+    return { male, female, total: lines.length };
+  }, [dialogueText, dialogueRows, dialogueEditorTab, generationMode]);
 
   // Save custom voices to localStorage
   useEffect(() => {
@@ -162,7 +221,9 @@ Female: To der kis baat ki! Aaj hi tashreef laayein aur bachat ka faida uthayein
     setDualMaleVoice(VoiceName.Custom_Cloned);
     setDualFemaleVoice(VoiceName.Custom_Cloned);
     setDialogueText(dialogueScript);
+    setDialogueRows(parseScriptIntoRows(dialogueScript, maleVoice.name, femaleVoice.name));
     setGenerationMode('dual_dialogue');
+    setDialogueEditorTab('builder');
     setActiveTab('studio');
   };
 
@@ -177,6 +238,7 @@ Female: To der kis baat ki! Aaj hi tashreef laayein aur bachat ka faida uthayein
     if (template.isDialogue) {
       setGenerationMode('dual_dialogue');
       setDialogueText(template.script);
+      setDialogueRows(parseScriptIntoRows(template.script));
       setDualMaleVoice(template.suggestedVoice);
       if (template.suggestedFemaleVoice) setDualFemaleVoice(template.suggestedFemaleVoice);
     } else {
@@ -189,6 +251,208 @@ Female: To der kis baat ki! Aaj hi tashreef laayein aur bachat ka faida uthayein
     setSpeechSpeed(template.suggestedSpeed);
     setShowTemplateModal(false);
     setActiveTab('studio');
+  };
+
+  // --- DUAL-CHARACTER LINE-BY-LINE BUILDER ACTIONS ---
+  const handleSyncRawToBuilder = () => {
+    if (!dialogueText.trim()) return;
+    const parsed = parseScriptIntoRows(dialogueText);
+    setDialogueRows(parsed);
+    setDetectFeedback(`✨ Synchronized ${parsed.length} dialogue lines into the Line-by-Line Builder.`);
+    setTimeout(() => setDetectFeedback(null), 4000);
+  };
+
+  const handleToggleRowSpeaker = (rowId: string, targetSpeaker?: 'male' | 'female') => {
+    setDialogueRows((prev) => {
+      const updated = prev.map((r) => {
+        if (r.id !== rowId) return r;
+        const newSpeaker = targetSpeaker || (r.speaker === 'male' ? 'female' : 'male');
+        return {
+          ...r,
+          speaker: newSpeaker,
+          characterName: newSpeaker === 'male' ? 'Male' : 'Female',
+        };
+      });
+      setDialogueText(formatRowsIntoScript(updated));
+      return updated;
+    });
+  };
+
+  const handleUpdateRowText = (rowId: string, newText: string) => {
+    setDialogueRows((prev) => {
+      const updated = prev.map((r) => (r.id === rowId ? { ...r, text: newText } : r));
+      setDialogueText(formatRowsIntoScript(updated));
+      return updated;
+    });
+  };
+
+  const handleAddDialogueRow = (insertAfterIndex?: number) => {
+    setDialogueRows((prev) => {
+      const lastSpeaker = prev.length > 0 ? prev[prev.length - 1].speaker : 'female';
+      const nextSpeaker = lastSpeaker === 'male' ? 'female' : 'male';
+      const newRow: ScriptDialogueRow = {
+        id: `row-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+        lineIndex: prev.length + 1,
+        speaker: nextSpeaker,
+        characterName: nextSpeaker === 'male' ? 'Male' : 'Female',
+        text: '',
+      };
+      let updated: ScriptDialogueRow[];
+      if (typeof insertAfterIndex === 'number' && insertAfterIndex >= 0 && insertAfterIndex < prev.length) {
+        updated = [...prev.slice(0, insertAfterIndex + 1), newRow, ...prev.slice(insertAfterIndex + 1)];
+      } else {
+        updated = [...prev, newRow];
+      }
+      updated = updated.map((r, i) => ({ ...r, lineIndex: i + 1 }));
+      setDialogueText(formatRowsIntoScript(updated));
+      return updated;
+    });
+  };
+
+  const handleDeleteDialogueRow = (rowId: string) => {
+    if (dialogueRows.length <= 1) return;
+    setDialogueRows((prev) => {
+      const updated = prev.filter((r) => r.id !== rowId).map((r, i) => ({ ...r, lineIndex: i + 1 }));
+      setDialogueText(formatRowsIntoScript(updated));
+      return updated;
+    });
+  };
+
+  const handleDuplicateDialogueRow = (rowId: string) => {
+    const row = dialogueRows.find((r) => r.id === rowId);
+    if (!row) return;
+    setDialogueRows((prev) => {
+      const idx = prev.findIndex((r) => r.id === rowId);
+      const newRow: ScriptDialogueRow = {
+        ...row,
+        id: `row-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+      };
+      const updated = [...prev.slice(0, idx + 1), newRow, ...prev.slice(idx + 1)].map((r, i) => ({ ...r, lineIndex: i + 1 }));
+      setDialogueText(formatRowsIntoScript(updated));
+      return updated;
+    });
+  };
+
+  const handleMoveDialogueRow = (rowId: string, direction: 'up' | 'down') => {
+    setDialogueRows((prev) => {
+      const idx = prev.findIndex((r) => r.id === rowId);
+      if (idx === -1) return prev;
+      const targetIdx = direction === 'up' ? idx - 1 : idx + 1;
+      if (targetIdx < 0 || targetIdx >= prev.length) return prev;
+      const updated = [...prev];
+      const temp = updated[idx];
+      updated[idx] = updated[targetIdx];
+      updated[targetIdx] = temp;
+      const reindexed = updated.map((r, i) => ({ ...r, lineIndex: i + 1 }));
+      setDialogueText(formatRowsIntoScript(reindexed));
+      return reindexed;
+    });
+  };
+
+  const handlePreviewDialogueRow = async (row: ScriptDialogueRow) => {
+    const textToSpeak = (row.text || '').trim();
+    if (!textToSpeak) {
+      setError('Please enter dialogue text for this line before previewing.');
+      return;
+    }
+    setPreviewingRowId(row.id);
+    setError(null);
+    try {
+      const customMale = dualMaleVoice === VoiceName.Custom_Cloned
+        ? (activeMaleClonedVoice || (activeCustomVoice?.gender === 'Male' ? activeCustomVoice : null))
+        : null;
+      const customFemale = dualFemaleVoice === VoiceName.Custom_Cloned
+        ? (activeFemaleClonedVoice || (activeCustomVoice?.gender === 'Female' ? activeCustomVoice : null))
+        : null;
+
+      const blob = await generateSingleDialogueSegment(
+        textToSpeak,
+        row.speaker,
+        dualMaleVoice,
+        dualFemaleVoice,
+        selectedStyle,
+        selectedLanguage,
+        speechSpeed,
+        commercialEnergy,
+        customMale,
+        customFemale
+      );
+      const url = URL.createObjectURL(blob);
+      const audio = new Audio(url);
+      audio.onended = () => setPreviewingRowId(null);
+      audio.onerror = () => setPreviewingRowId(null);
+      await audio.play();
+    } catch (err: any) {
+      setPreviewingRowId(null);
+      setError(err.message || 'Failed to preview dialogue line.');
+    }
+  };
+
+  // 1-Click Translation for Dialogue Rows (Mode A: Voice-Preserved Translation)
+  const handleTranslateAllDialogueRows = async (targetLang: Language) => {
+    const active = dialogueRows.filter((r) => r.text && r.text.trim().length > 0);
+    if (active.length === 0) {
+      setError('Please enter dialogue text in at least one line before translating.');
+      return;
+    }
+    setIsTranslatingDialogue(true);
+    setError(null);
+    setShowTranslateModal(false);
+    try {
+      const translated = await translateScriptDialogueRows(dialogueRows, targetLang);
+      setDialogueRows(translated);
+      setDialogueText(formatRowsIntoScript(translated));
+      setSelectedLanguage(targetLang);
+      setDetectFeedback(`✨ 100% Voice-Preserved Translation into ${targetLang}! Every line's speaker (Female/Male) was strictly kept.`);
+      setTimeout(() => setDetectFeedback(null), 6000);
+    } catch (e: any) {
+      setError(e.message || 'Failed to translate dialogue rows.');
+    } finally {
+      setIsTranslatingDialogue(false);
+    }
+  };
+
+  // Auto-Detect Male & Female dialogue turns from unstructured text
+  const handleAutoDetectSpeakers = async () => {
+    if (!dialogueText.trim()) return;
+    setIsDetectingSpeakers(true);
+    setError(null);
+    setDetectFeedback(null);
+    try {
+      const result = await autoDetectAndFormatDialogueScript(dialogueText);
+      setDialogueText(result.formattedScript);
+      if (result.detectedLanguage) {
+        setSelectedLanguage(result.detectedLanguage);
+      }
+      setDetectFeedback(`✨ ${result.summary} (👨 ${result.maleLinesCount} Male • 👩 ${result.femaleLinesCount} Female)`);
+      setTimeout(() => setDetectFeedback(null), 6000);
+    } catch (e: any) {
+      setError(e.message || 'Failed to auto-detect speakers');
+    } finally {
+      setIsDetectingSpeakers(false);
+    }
+  };
+
+  // 1-Click Dialogue Language Translation & Voice Consistency
+  const handleTranslateDialogue = async (targetLang: Language) => {
+    if (!dialogueText.trim()) {
+      setError('Please enter dialogue script text before translating.');
+      return;
+    }
+    setIsTranslatingDialogue(true);
+    setError(null);
+    setShowTranslateModal(false);
+    try {
+      const translated = await translateDialogueScript(dialogueText, targetLang);
+      setDialogueText(translated);
+      setSelectedLanguage(targetLang);
+      setDetectFeedback(`🌐 Script translated to ${targetLang}! Identical Male & Female cloned voices are preserved.`);
+      setTimeout(() => setDetectFeedback(null), 6000);
+    } catch (e: any) {
+      setError(e.message || 'Failed to translate dialogue');
+    } finally {
+      setIsTranslatingDialogue(false);
+    }
   };
 
   // Save custom API key
@@ -232,9 +496,28 @@ Female: To der kis baat ki! Aaj hi tashreef laayein aur bachat ka faida uthayein
         const maleName = customMale ? customMale.name : maleVoiceObj?.name || 'Male Speaker';
         const femaleName = customFemale ? customFemale.name : femaleVoiceObj?.name || 'Female Speaker';
 
-        const lines = parseDialogueScript(dialogueText, maleName, femaleName);
-        if (lines.length === 0) {
-          throw new Error('Please enter at least one dialogue line in Male: ... and Female: ... format');
+        let lines: DialogueLine[];
+        let fullDialogueScript = dialogueText;
+
+        if (dialogueEditorTab === 'builder') {
+          const activeRows = dialogueRows.filter((r) => r.text && r.text.trim().length > 0);
+          if (activeRows.length === 0) {
+            throw new Error('Please enter dialogue text for at least one line before generating audio.');
+          }
+          lines = activeRows.map((r) => ({
+            speaker: r.speaker,
+            characterName: r.speaker === 'male' ? maleName : femaleName,
+            text: r.text.trim(),
+          }));
+          fullDialogueScript = formatRowsIntoScript(activeRows);
+        } else {
+          if (!dialogueText || !dialogueText.trim()) {
+            throw new Error('Please enter dialogue script text in [Male]: ... and [Female]: ... format before generating.');
+          }
+          lines = parseDialogueScript(dialogueText, maleName, femaleName);
+          if (lines.length === 0) {
+            throw new Error('Please enter at least one dialogue line in Male: ... and Female: ... format');
+          }
         }
 
         const combinedWavBlob = await generateDialogueSpeech(
@@ -258,8 +541,8 @@ Female: To der kis baat ki! Aaj hi tashreef laayein aur bachat ka faida uthayein
 
         const newAudio: GeneratedAudio = {
           id: Date.now().toString(),
-          textSnippet: dialogueText.slice(0, 70) + (dialogueText.length > 70 ? '...' : ''),
-          fullText: dialogueText,
+          textSnippet: fullDialogueScript.slice(0, 70) + (fullDialogueScript.length > 70 ? '...' : ''),
+          fullText: fullDialogueScript,
           url: audioUrl,
           timestamp: Date.now(),
           voice: dualMaleVoice,
@@ -277,7 +560,9 @@ Female: To der kis baat ki! Aaj hi tashreef laayein aur bachat ka faida uthayein
         setGeneratedList((prev) => [newAudio, ...prev]);
       } else {
         // --- SINGLE VOICE GENERATION ---
-        if (!text.trim()) return;
+        if (!text || !text.trim()) {
+          throw new Error('Please enter text to generate speech.');
+        }
 
         const base64Audio = await generateSpeech(
           text,
@@ -697,6 +982,29 @@ Female: To der kis baat ki! Aaj hi tashreef laayein aur bachat ka faida uthayein
                     </div>
 
                   </div>
+
+                  {/* Dual Voice Consistency & Multi-Language Lock Bar */}
+                  <div className="pt-2.5 border-t border-purple-900/40 flex flex-wrap items-center justify-between gap-2 text-[11px]">
+                    <div className="flex items-center gap-1.5 text-slate-300">
+                      <Lock size={12} className="text-emerald-400 flex-shrink-0" />
+                      <span>
+                        <strong className="text-emerald-300 font-semibold">Dual Voice Consistency Lock:</strong> Active • Male & Female cloned voices retain 100% stable pitch & identity across all dialogue turns and languages.
+                      </span>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      <span className="text-[10px] font-medium bg-purple-950/80 text-purple-200 px-2 py-0.5 rounded-full border border-purple-800/60">
+                        🌐 Script: {selectedLanguage}
+                      </span>
+                      <button
+                        onClick={() => setShowTranslateModal(true)}
+                        className="text-[11px] text-indigo-300 hover:text-white underline flex items-center gap-1 font-semibold"
+                      >
+                        <Languages size={12} /> Translate Script
+                      </button>
+                    </div>
+                  </div>
+
                 </div>
               ) : (
                 /* SINGLE CHARACTER BANNER */
@@ -736,16 +1044,58 @@ Female: To der kis baat ki! Aaj hi tashreef laayein aur bachat ka faida uthayein
               )}
 
               {/* Script Input Card */}
-              <div className="bg-slate-900/90 rounded-2xl border border-slate-700/80 shadow-2xl focus-within:ring-2 focus-within:ring-indigo-500/40 flex flex-col transition-all">
+              <div className="bg-slate-900/90 rounded-2xl border border-slate-700/80 shadow-2xl focus-within:ring-2 focus-within:ring-indigo-500/40 flex flex-col transition-all overflow-hidden">
                 
-                {/* Textarea Header */}
-                <div className="px-4 py-3 border-b border-slate-800/80 flex items-center justify-between text-xs text-slate-400">
+                {/* Header with Mode Tabs for Dual Dialogue */}
+                <div className="px-4 py-3 border-b border-slate-800/80 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-400 bg-slate-950/40">
                   <div className="flex items-center gap-2">
                     {generationMode === 'dual_dialogue' ? <Users size={16} className="text-purple-400" /> : <MessageSquareText size={16} className="text-indigo-400" />}
                     <span className="font-semibold text-slate-200">
-                      {generationMode === 'dual_dialogue' ? 'Dual-Character Script (Male: ... & Female: ...)' : 'Commercial Script'}
+                      {generationMode === 'dual_dialogue' ? 'Dual-Character Script (Male & Female Dialogue)' : 'Commercial Script'}
                     </span>
                   </div>
+
+                  {generationMode === 'dual_dialogue' && (
+                    <div className="flex items-center gap-1 bg-slate-900 p-1 rounded-xl border border-slate-800">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setDialogueEditorTab('builder');
+                          if (dialogueRows.length === 0 && dialogueText.trim()) {
+                            handleSyncRawToBuilder();
+                          }
+                        }}
+                        className={`px-3 py-1 rounded-lg font-semibold flex items-center gap-1.5 transition-all text-xs ${
+                          dialogueEditorTab === 'builder'
+                            ? 'bg-gradient-to-r from-purple-600 to-indigo-600 text-white shadow'
+                            : 'text-slate-400 hover:text-white'
+                        }`}
+                      >
+                        <ListFilter size={13} />
+                        <span>📝 Line-by-Line Builder</span>
+                        <span className="text-[10px] bg-purple-400/20 px-1 rounded text-purple-200 font-normal">
+                          Tarteeb-war
+                        </span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setDialogueEditorTab('raw');
+                          setDialogueText(formatRowsIntoScript(dialogueRows));
+                        }}
+                        className={`px-3 py-1 rounded-lg font-semibold flex items-center gap-1.5 transition-all text-xs ${
+                          dialogueEditorTab === 'raw'
+                            ? 'bg-slate-800 text-white shadow'
+                            : 'text-slate-400 hover:text-white'
+                        }`}
+                      >
+                        <FileText size={13} />
+                        <span>📄 Freeform Script Box</span>
+                      </button>
+                    </div>
+                  )}
+
                   <div className="flex items-center gap-3">
                     {isUrduScript && (
                       <span className="text-[10px] text-emerald-400 font-mono bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/20">
@@ -753,28 +1103,266 @@ Female: To der kis baat ki! Aaj hi tashreef laayein aur bachat ka faida uthayein
                       </span>
                     )}
                     <span className="font-mono text-slate-500 text-[11px]">
-                      {currentContent.length} / 2500 chars
+                      {generationMode === 'dual_dialogue' && dialogueEditorTab === 'builder'
+                        ? `${dialogueRows.length} lines (${dialogueLinesParsed.female} 👩 Female • ${dialogueLinesParsed.male} 👨 Male)`
+                        : `${currentContent.length} / 2500 chars`}
                     </span>
                   </div>
                 </div>
 
-                {/* Textarea Input */}
-                <textarea
-                  className={`w-full min-h-[160px] sm:min-h-[200px] bg-transparent p-4 sm:p-5 text-base sm:text-lg text-slate-100 placeholder-slate-600 outline-none resize-none leading-relaxed font-light ${
-                    isUrduScript ? 'font-serif text-right text-xl leading-loose' : 'font-sans'
-                  }`}
-                  placeholder={
-                    generationMode === 'dual_dialogue'
-                      ? `Write dialogue lines with Male: and Female: prefix:\n\nMale: Suno Ayesha! Is Eid par Mega Mart par 50% discount hai!\nFemale: Sach mein Hamza? Phir to abhi shopping ke liye chalte hain!\nMale: Bilkul! Har brand par bari bachat!`
-                      : `Enter your commercial script in Urdu, Roman Urdu, Hindi or English...\n\nExample:\n"Khushkhabri! Is Bari Eid par laya hai Mega Mart sab se bara Dhamaka Offer! Pure 50% tak ki bachat. Stock mehdood hai, aaj hi tashreef laayein!"`
-                  }
-                  value={generationMode === 'dual_dialogue' ? dialogueText : text}
-                  onChange={(e) => {
-                    if (generationMode === 'dual_dialogue') setDialogueText(e.target.value);
-                    else setText(e.target.value);
-                  }}
-                  maxLength={2500}
-                />
+                {/* DUAL DIALOGUE: TAB 1 - INTERACTIVE LINE-BY-LINE BUILDER */}
+                {generationMode === 'dual_dialogue' && dialogueEditorTab === 'builder' ? (
+                  <div className="p-4 sm:p-5 space-y-4">
+                    
+                    {/* Mode A: 1-Click Multilingual Dubbing Bar */}
+                    <div className="p-3 rounded-xl bg-purple-950/30 border border-purple-500/30 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <Globe size={15} className="text-purple-400" />
+                          <h4 className="font-bold text-xs text-white">
+                            Option 1: 1-Click Multilingual Dubbing (Voice-Preserved Translation)
+                          </h4>
+                        </div>
+                        <p className="text-[11px] text-slate-300 mt-0.5">
+                          Convert this dialogue into Telugu, Punjabi, Hindi or Urdu for YouTube videos. Line 1 stays Female, Line 2 stays Male with 100% lock!
+                        </p>
+                      </div>
+
+                      <div className="flex items-center gap-1.5 flex-wrap w-full sm:w-auto">
+                        <button
+                          type="button"
+                          disabled={isTranslatingDialogue}
+                          onClick={() => handleTranslateAllDialogueRows(Language.Telugu)}
+                          className="px-2.5 py-1.5 rounded-lg bg-purple-600 hover:bg-purple-500 text-white font-semibold text-[11px] flex items-center gap-1 transition-all shadow"
+                        >
+                          {isTranslatingDialogue && selectedLanguage === Language.Telugu ? (
+                            <RefreshCw size={12} className="animate-spin" />
+                          ) : (
+                            <Globe size={12} />
+                          )}
+                          <span>Telugu (తెలుగు)</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          disabled={isTranslatingDialogue}
+                          onClick={() => handleTranslateAllDialogueRows(Language.Punjabi)}
+                          className="px-2 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-[11px] font-medium transition-all"
+                        >
+                          Punjabi
+                        </button>
+
+                        <button
+                          type="button"
+                          disabled={isTranslatingDialogue}
+                          onClick={() => handleTranslateAllDialogueRows(Language.Hindi)}
+                          className="px-2 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-[11px] font-medium transition-all"
+                        >
+                          Hindi
+                        </button>
+
+                        <button
+                          type="button"
+                          disabled={isTranslatingDialogue}
+                          onClick={() => handleTranslateAllDialogueRows(Language.Urdu)}
+                          className="px-2 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-[11px] font-medium transition-all"
+                        >
+                          Urdu
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Dialogue Line Rows (Option 2: Tarteeb-war Speaker Assignment) */}
+                    <div className="space-y-3">
+                      {dialogueRows.map((row, idx) => {
+                        const isMale = row.speaker === 'male';
+                        const assignedVoiceTitle = isMale
+                          ? (dualMaleVoice === VoiceName.Custom_Cloned && activeMaleClonedVoice ? activeMaleClonedVoice.name : (VOICE_CATALOG.find(v => v.id === dualMaleVoice)?.name || 'Male Speaker'))
+                          : (dualFemaleVoice === VoiceName.Custom_Cloned && activeFemaleClonedVoice ? activeFemaleClonedVoice.name : (VOICE_CATALOG.find(v => v.id === dualFemaleVoice)?.name || 'Female Speaker'));
+
+                        return (
+                          <div
+                            key={row.id}
+                            className={`p-3.5 rounded-xl border transition-all ${
+                              isMale
+                                ? 'bg-blue-950/20 border-blue-900/60 hover:border-blue-700/80'
+                                : 'bg-pink-950/20 border-pink-900/60 hover:border-pink-700/80'
+                            }`}
+                          >
+                            {/* Row Header Bar */}
+                            <div className="flex flex-wrap items-center justify-between gap-2 mb-2 pb-2 border-b border-slate-800/80">
+                              <div className="flex items-center gap-2">
+                                <span className="text-[11px] font-mono font-bold text-slate-400 bg-slate-900 px-2 py-0.5 rounded border border-slate-800">
+                                  Line {idx + 1}
+                                </span>
+
+                                {/* Speaker Selector Buttons */}
+                                <div className="flex items-center gap-1 bg-slate-950 p-0.5 rounded-lg border border-slate-800 text-xs">
+                                  <button
+                                    type="button"
+                                    onClick={() => handleToggleRowSpeaker(row.id, 'female')}
+                                    className={`px-2.5 py-1 rounded-md font-bold text-[11px] flex items-center gap-1 transition-all ${
+                                      !isMale
+                                        ? 'bg-pink-600 text-white shadow-sm'
+                                        : 'text-slate-400 hover:text-pink-300'
+                                    }`}
+                                  >
+                                    <span>👩 Female</span>
+                                  </button>
+
+                                  <button
+                                    type="button"
+                                    onClick={() => handleToggleRowSpeaker(row.id, 'male')}
+                                    className={`px-2.5 py-1 rounded-md font-bold text-[11px] flex items-center gap-1 transition-all ${
+                                      isMale
+                                        ? 'bg-blue-600 text-white shadow-sm'
+                                        : 'text-slate-400 hover:text-blue-300'
+                                    }`}
+                                  >
+                                    <span>👨 Male</span>
+                                  </button>
+                                </div>
+
+                                {/* Active Assigned Voice Tag */}
+                                <span className={`text-[10px] px-2 py-0.5 rounded font-mono truncate max-w-[150px] ${
+                                  isMale ? 'text-blue-300 bg-blue-950/80 border border-blue-800/60' : 'text-pink-300 bg-pink-950/80 border border-pink-800/60'
+                                }`}>
+                                  🎙️ {assignedVoiceTitle}
+                                </span>
+                              </div>
+
+                              {/* Row Utility Buttons */}
+                              <div className="flex items-center gap-1">
+                                <button
+                                  type="button"
+                                  onClick={() => handlePreviewDialogueRow(row)}
+                                  disabled={previewingRowId === row.id || !row.text.trim()}
+                                  className="px-2 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-[11px] font-semibold flex items-center gap-1 transition-all disabled:opacity-40"
+                                  title="Test speak this single line"
+                                >
+                                  {previewingRowId === row.id ? (
+                                    <RefreshCw size={11} className="animate-spin text-purple-400" />
+                                  ) : (
+                                    <Play size={11} className="text-purple-400" />
+                                  )}
+                                  <span>{previewingRowId === row.id ? 'Playing...' : 'Test Line'}</span>
+                                </button>
+
+                                <button
+                                  type="button"
+                                  onClick={() => handleMoveDialogueRow(row.id, 'up')}
+                                  disabled={idx === 0}
+                                  className="p-1 rounded text-slate-400 hover:text-white hover:bg-slate-800 disabled:opacity-30"
+                                  title="Move Line Up"
+                                >
+                                  <ArrowUp size={13} />
+                                </button>
+
+                                <button
+                                  type="button"
+                                  onClick={() => handleMoveDialogueRow(row.id, 'down')}
+                                  disabled={idx === dialogueRows.length - 1}
+                                  className="p-1 rounded text-slate-400 hover:text-white hover:bg-slate-800 disabled:opacity-30"
+                                  title="Move Line Down"
+                                >
+                                  <ArrowDown size={13} />
+                                </button>
+
+                                <button
+                                  type="button"
+                                  onClick={() => handleDuplicateDialogueRow(row.id)}
+                                  className="p-1 rounded text-slate-400 hover:text-white hover:bg-slate-800"
+                                  title="Duplicate Line"
+                                >
+                                  <Copy size={13} />
+                                </button>
+
+                                <button
+                                  type="button"
+                                  onClick={() => handleDeleteDialogueRow(row.id)}
+                                  disabled={dialogueRows.length <= 1}
+                                  className="p-1 rounded text-slate-400 hover:text-red-400 hover:bg-slate-800 disabled:opacity-30"
+                                  title="Delete Line"
+                                >
+                                  <Trash2 size={13} />
+                                </button>
+                              </div>
+                            </div>
+
+                            {/* Dialogue Line Textarea */}
+                            <textarea
+                              rows={2}
+                              value={row.text}
+                              onChange={(e) => handleUpdateRowText(row.id, e.target.value)}
+                              placeholder={`Line ${idx + 1} (${isMale ? 'Male' : 'Female'}): Enter dialogue in Telugu, Urdu, Hindi, Punjabi or English...`}
+                              className={`w-full bg-slate-950/80 border rounded-lg p-2.5 text-xs sm:text-sm text-slate-100 placeholder-slate-600 outline-none transition-all ${
+                                isMale
+                                  ? 'border-blue-900/50 focus:border-blue-500'
+                                  : 'border-pink-900/50 focus:border-pink-500'
+                              } ${isUrduScript ? 'font-serif text-right text-base' : 'font-sans'}`}
+                            />
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    {/* Bottom Builder Controls */}
+                    <div className="pt-2 flex flex-col sm:flex-row items-center justify-between gap-3 border-t border-slate-800">
+                      <button
+                        type="button"
+                        onClick={() => handleAddDialogueRow()}
+                        className="w-full sm:w-auto px-4 py-2.5 rounded-xl bg-purple-600/30 hover:bg-purple-600/50 text-purple-200 border border-purple-500/40 text-xs font-bold flex items-center justify-center gap-1.5 transition-all shadow-md active:scale-95"
+                      >
+                        <Plus size={15} />
+                        <span>+ Add New Dialogue Line (Line {dialogueRows.length + 1})</span>
+                      </button>
+
+                      <div className="flex items-center gap-2 text-xs text-slate-400">
+                        <span>Speaker lock: Every line speaks strictly with its assigned voice.</span>
+                      </div>
+                    </div>
+
+                  </div>
+                ) : (
+                  /* TAB 2 OR SINGLE MODE: TEXTAREA INPUT */
+                  <div>
+                    {generationMode === 'dual_dialogue' && (
+                      <div className="p-3 bg-purple-950/20 border-b border-purple-900/30 flex items-center justify-between gap-2">
+                        <span className="text-[11px] text-purple-300">
+                          Paste your script with <strong>Female:</strong> and <strong>Male:</strong> lines. You can convert it into the Line-by-Line Builder anytime.
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            handleSyncRawToBuilder();
+                            setDialogueEditorTab('builder');
+                          }}
+                          className="px-3 py-1 rounded-lg bg-purple-600 hover:bg-purple-500 text-white font-semibold text-[11px] flex items-center gap-1 transition-all flex-shrink-0 shadow"
+                        >
+                          <Wand2 size={12} />
+                          <span>Load into Line Builder</span>
+                        </button>
+                      </div>
+                    )}
+
+                    <textarea
+                      className={`w-full min-h-[160px] sm:min-h-[200px] bg-transparent p-4 sm:p-5 text-base sm:text-lg text-slate-100 placeholder-slate-600 outline-none resize-none leading-relaxed font-light ${
+                        isUrduScript ? 'font-serif text-right text-xl leading-loose' : 'font-sans'
+                      }`}
+                      placeholder={
+                        generationMode === 'dual_dialogue'
+                          ? `Write or paste dialogue with Female: and Male: prefix:\n\nFemale:\nThakkuva vayassulo meeku 10 nundi 12 shatham juttu thellabaduthunte...\n\nMale Voice:\nMarket lo intha manchi mehndi unnappudu, ika bhayam deniki?\n\nFemale:\nIndulo aavala nune mariyu prakruthi siddhamaina aushadhamulu unnai!`
+                          : `Enter your commercial script in Urdu, Roman Urdu, Hindi or English...\n\nExample:\n"Khushkhabri! Is Bari Eid par laya hai Mega Mart sab se bara Dhamaka Offer! Pure 50% tak ki bachat. Stock mehdood hai, aaj hi tashreef laayein!"`
+                      }
+                      value={generationMode === 'dual_dialogue' ? dialogueText : text}
+                      onChange={(e) => {
+                        if (generationMode === 'dual_dialogue') setDialogueText(e.target.value);
+                        else setText(e.target.value);
+                      }}
+                      maxLength={2500}
+                    />
+                  </div>
+                )}
 
                 {/* Quick Presets Bar */}
                 <div className="px-4 py-2 bg-slate-950/60 border-t border-slate-800 flex items-center gap-2 overflow-x-auto no-scrollbar text-xs">

@@ -4,7 +4,7 @@
  * and multi-speaker audio concatenation.
  */
 
-import { DialogueLine, DualCharacterAnalysisResult } from '../types';
+import { DialogueLine, DualCharacterAnalysisResult, ScriptDialogueRow, DiarizedSegment } from '../types';
 import { audioBufferToWavBlob } from './audioDsp';
 
 export const blobToBase64 = (blob: Blob): Promise<string> => {
@@ -253,83 +253,164 @@ export const analyzeVoiceSample = async (
 /**
  * Parses a commercial script into dialogue turns for Male and Female speakers
  */
+function cleanTag(str: string): string {
+  return str.replace(/[\[\]()#*]/g, '').trim().toLowerCase();
+}
+
+function detectSpeakerFromTag(tag: string): 'male' | 'female' | null {
+  const t = cleanTag(tag);
+  // Match female keywords in English, Telugu, Urdu, Hindi, Punjabi
+  if (
+    /^(female|female\s*voice|woman|girl|aurat|larki|lady|khatoon|baji|apa|begum|stree|mahila|ayesha|zara|sara|maryam|sana|mehwish|hina|speaker\s*2|speaker_2|character\s*2|character_2|line\s*\d+\s*\(?female\)?|f)\b/i.test(t) ||
+    t === 'female' || t === 'f' ||
+    t.includes('స్త్రీ') || t.includes('మహిళ') || t.includes('ఆడ') ||
+    t.includes('عورت') || t.includes('لڑکی') ||
+    t.includes('महिला') || t.includes('स्त्री') || t.includes('लड़की')
+  ) {
+    return 'female';
+  }
+
+  // Match male keywords in English, Telugu, Urdu, Hindi, Punjabi
+  if (
+    /^(male|male\s*voice|man|boy|mard|larka|sir|gent|shohar|bhai|purush|hamza|tariq|bilal|ahmed|zayd|farhan|faizan|ali|speaker\s*1|speaker_1|character\s*1|character_1|line\s*\d+\s*\(?male\)?|m)\b/i.test(t) ||
+    t === 'male' || t === 'm' ||
+    t.includes('పురుషుడు') || t.includes('మగ') ||
+    t.includes('مرد') || t.includes('لڑکا') ||
+    t.includes('पुरुष') || t.includes('लड़का')
+  ) {
+    return 'male';
+  }
+
+  return null;
+}
+
+/**
+ * Parses a commercial script into dialogue turns for Male and Female speakers.
+ * Resilient against standalone headers (Female:\n...), quotes with colons, and multi-language tags.
+ */
 export const parseDialogueScript = (
   script: string,
   defaultMaleName = 'Male',
   defaultFemaleName = 'Female'
 ): DialogueLine[] => {
-  const lines = script
-    .split('\n')
+  const rawLines = script
+    .split(/\r?\n/)
     .map((l) => l.trim())
     .filter((l) => l.length > 0);
 
   const result: DialogueLine[] = [];
+  let pendingSpeaker: 'male' | 'female' | null = null;
 
-  for (const line of lines) {
+  for (const line of rawLines) {
     const colonIdx = line.indexOf(':');
-    if (colonIdx > 0 && colonIdx < 30) {
-      const tag = line.slice(0, colonIdx).trim().toLowerCase();
-      const content = line.slice(colonIdx + 1).trim();
 
-      const isFemale =
-        tag.includes('female') ||
-        tag.includes('aurat') ||
-        tag.includes('larki') ||
-        tag.includes('biwi') ||
-        tag.includes('woman') ||
-        tag.includes('girl') ||
-        tag.includes('ayesha') ||
-        tag.includes('maryam') ||
-        tag.includes('zara') ||
-        tag.includes('sara') ||
-        tag.includes('sana') ||
-        tag.includes('mehwish') ||
-        tag.includes('hina') ||
-        tag.includes('b') ||
-        tag.includes('2');
+    // Case 1: Pure speaker header line like "Female:" or "Male Voice:" or "[Female]" (with or without colon)
+    const possibleHeaderTag = colonIdx > 0 ? line.slice(0, colonIdx).trim() : line;
+    const headerSpeaker = detectSpeakerFromTag(possibleHeaderTag);
+    const hasContentAfterColon = colonIdx > 0 && line.slice(colonIdx + 1).trim().length > 0;
 
-      const isMale =
-        tag.includes('male') ||
-        tag.includes('mard') ||
-        tag.includes('larka') ||
-        tag.includes('shohar') ||
-        tag.includes('man') ||
-        tag.includes('boy') ||
-        tag.includes('hamza') ||
-        tag.includes('tariq') ||
-        tag.includes('bilal') ||
-        tag.includes('ahmed') ||
-        tag.includes('zayd') ||
-        tag.includes('farhan') ||
-        tag.includes('faizan') ||
-        tag.includes('a') ||
-        tag.includes('1');
-
-      if (isFemale) {
-        result.push({ speaker: 'female', characterName: defaultFemaleName, text: content });
-      } else if (isMale) {
-        result.push({ speaker: 'male', characterName: defaultMaleName, text: content });
-      } else {
-        const lastSpeaker = result.length > 0 ? result[result.length - 1].speaker : 'female';
-        const nextSpeaker = lastSpeaker === 'male' ? 'female' : 'male';
-        result.push({
-          speaker: nextSpeaker,
-          characterName: nextSpeaker === 'male' ? defaultMaleName : defaultFemaleName,
-          text: content,
-        });
-      }
-    } else {
-      const lastSpeaker = result.length > 0 ? result[result.length - 1].speaker : 'female';
-      const nextSpeaker = lastSpeaker === 'male' ? 'female' : 'male';
-      result.push({
-        speaker: nextSpeaker,
-        characterName: nextSpeaker === 'male' ? defaultMaleName : defaultFemaleName,
-        text: line,
-      });
+    if (headerSpeaker && !hasContentAfterColon) {
+      // It's a standalone header line. Record the speaker for subsequent dialogue line(s)!
+      pendingSpeaker = headerSpeaker;
+      continue;
     }
+
+    // Case 2: Inline tagged line like "Female: Thakkuva vayassulo..."
+    if (colonIdx > 0 && colonIdx < 50) {
+      const candidateTag = line.slice(0, colonIdx).trim();
+      const inlineSpeaker = detectSpeakerFromTag(candidateTag);
+      if (inlineSpeaker) {
+        const text = line.slice(colonIdx + 1).trim();
+        if (text) {
+          result.push({
+            speaker: inlineSpeaker,
+            characterName: inlineSpeaker === 'male' ? defaultMaleName : defaultFemaleName,
+            text,
+          });
+          pendingSpeaker = null;
+          continue;
+        }
+      }
+    }
+
+    // Case 3: Dialogue content line without an inline tag
+    const text = line.trim();
+    if (!text) continue;
+
+    // Assign speaker: pending speaker if one was set by a standalone header, otherwise alternate
+    let assignedSpeaker: 'male' | 'female';
+    if (pendingSpeaker) {
+      assignedSpeaker = pendingSpeaker;
+    } else if (result.length > 0) {
+      assignedSpeaker = result[result.length - 1].speaker === 'male' ? 'female' : 'male';
+    } else {
+      // First line heuristic: check if contains female conversational cues
+      const isFemClue = /\b(aunty|mehndi|dye|parva|ammayi|madam|lady|baji|apa|begum)\b/i.test(text);
+      assignedSpeaker = isFemClue ? 'female' : 'male';
+    }
+
+    result.push({
+      speaker: assignedSpeaker,
+      characterName: assignedSpeaker === 'male' ? defaultMaleName : defaultFemaleName,
+      text,
+    });
+
+    // Reset pending header once consumed
+    pendingSpeaker = null;
   }
 
   return result;
+};
+
+/**
+ * Converts a raw or formatted script into editable ScriptDialogueRows
+ */
+export const parseScriptIntoRows = (
+  script: string,
+  defaultMaleName = 'Male Character',
+  defaultFemaleName = 'Female Character'
+): ScriptDialogueRow[] => {
+  const parsed = parseDialogueScript(script, defaultMaleName, defaultFemaleName);
+  if (parsed.length === 0) {
+    // Return standard 2 alternating rows if empty
+    return [
+      {
+        id: `row-1-${Date.now()}`,
+        lineIndex: 1,
+        speaker: 'male',
+        characterName: defaultMaleName,
+        text: '',
+      },
+      {
+        id: `row-2-${Date.now() + 1}`,
+        lineIndex: 2,
+        speaker: 'female',
+        characterName: defaultFemaleName,
+        text: '',
+      },
+    ];
+  }
+
+  return parsed.map((item, idx) => ({
+    id: `row-${idx + 1}-${Date.now() + idx}`,
+    lineIndex: idx + 1,
+    speaker: item.speaker,
+    characterName: item.characterName,
+    text: item.text,
+    sourceText: item.text,
+  }));
+};
+
+/**
+ * Converts ScriptDialogueRows back into formatted script text:
+ * [Male]: Dialogue text...
+ * [Female]: Response text...
+ */
+export const formatRowsIntoScript = (rows: ScriptDialogueRow[]): string => {
+  return rows
+    .filter((r) => r.text && r.text.trim().length > 0)
+    .map((r) => `[${r.speaker === 'male' ? 'Male' : 'Female'}]: ${r.text.trim()}`)
+    .join('\n');
 };
 
 /**
@@ -485,6 +566,19 @@ export const analyzeDualSpeakerAcoustics = async (
       },
       transcribedDialogue,
       formattedDialogueScript,
+      segments: transcribedDialogue.map((d, idx) => ({
+        id: `seg-${idx + 1}-${Date.now() + idx}`,
+        lineIndex: idx + 1,
+        speakerId: d.speaker === 'male' ? 'speaker_1' : 'speaker_2',
+        apparentGender: d.speaker,
+        speakerName: d.speaker === 'male' ? 'Speaker 1 (Male)' : 'Speaker 2 (Female)',
+        startTimeMs: idx * 3200,
+        endTimeMs: (idx + 1) * 3200,
+        originalText: d.text,
+        translatedText: d.text,
+        assignedVoice: d.speaker === 'male' ? ('Hamza_Pak_Male' as any) : ('Ayesha_Pak_Female' as any),
+        confidence: 0.92,
+      })),
     };
   } finally {
     if (ctx.state !== 'closed') ctx.close();

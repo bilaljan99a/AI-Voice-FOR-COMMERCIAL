@@ -69,6 +69,54 @@ export enum Language {
   English = 'Pakistani English (Commercial Accent)',
   GlobalEnglish = 'English (Global Standard)',
   Arabic = 'Arabic (العربية)',
+  Punjabi = 'Punjabi (پنجابی / ਪੰਜਾਬੀ)',
+  Pashto = 'Pashto (پښتو)',
+  Sindhi = 'Sindhi (سنڌي)',
+  Telugu = 'Telugu (తెలుగు)',
+}
+
+export type DubbingWorkflowMode = 'mode_a_auto' | 'mode_b_script' | 'solo_classic';
+
+export interface ScriptDialogueRow {
+  id: string;
+  lineIndex: number;
+  speaker: 'male' | 'female';
+  characterName: string;
+  text: string;
+  sourceText?: string;
+  targetText?: string;
+  startTimeMs?: number;
+  endTimeMs?: number;
+  confidence?: number;
+  warning?: string;
+  audioBlobUrl?: string;
+  isGenerating?: boolean;
+}
+
+export interface DiarizedSegment {
+  id: string;
+  lineIndex: number;
+  speakerId: 'speaker_1' | 'speaker_2';
+  apparentGender: 'male' | 'female';
+  speakerName: string;
+  startTimeMs: number;
+  endTimeMs: number;
+  originalText: string;
+  translatedText: string;
+  assignedVoice: VoiceName;
+  assignedClonedVoice?: CustomClonedVoice | null;
+  confidence?: number;
+  warning?: string;
+  audioBlobUrl?: string;
+  isGenerating?: boolean;
+}
+
+export interface AutoDetectSpeakersResult {
+  formattedScript: string;
+  detectedLanguage?: Language;
+  maleLinesCount: number;
+  femaleLinesCount: number;
+  summary: string;
 }
 
 export type CommercialEnergy = 'Subtle & Premium' | 'Balanced Commercial' | 'High-Impact Dhamaka';
@@ -95,6 +143,8 @@ export interface DialogueLine {
   speaker: 'male' | 'female';
   characterName: string;
   text: string;
+  startTimeMs?: number;
+  endTimeMs?: number;
 }
 
 export interface DualCharacterAnalysisResult {
@@ -122,6 +172,7 @@ export interface DualCharacterAnalysisResult {
   };
   transcribedDialogue: DialogueLine[];
   formattedDialogueScript: string;
+  segments?: DiarizedSegment[];
 }
 
 export interface AdTemplate {
